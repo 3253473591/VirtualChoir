@@ -1,0 +1,13 @@
+# 自行安装torch，CPU或CUDA版本均可
+# 下载地址：https://download.pytorch.org/whl/torch/
+
+PySide6>=6.6
+numpy>=1.26
+scipy>=1.11
+soundfile>=0.12
+requests>=2.31
+pyroomacoustics>=0.8
+sounddevice>=0.5
+librosa>=0.10
+pyworld>=0.3.4
+torchcrepe>=0.0.24
