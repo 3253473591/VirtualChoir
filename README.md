@@ -8,8 +8,6 @@
 
 ## 开始
 
-### 1. 安装依赖
-
 ```powershell
 git clone https://github.com/3253473591/VirtualChoir.git
 pip install -r requirements.txt
