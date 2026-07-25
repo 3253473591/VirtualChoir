@@ -1,4 +1,8 @@
+[中文](README.md) | [English](readme_en.md)
+
 # Virtual Choir
+
+Repository: [3253473591/VirtualChoir](https://github.com/3253473591/VirtualChoir)
 
 **Windows desktop virtual choir spatial rendering tool** — import multi-track solo vocal recordings into a virtual acoustic space, position singers in a 3D room, configure microphone arrays and reverb parameters, then render a spatially immersive stereo choir mix.
 

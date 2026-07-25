@@ -1,4 +1,8 @@
+[中文](README.md) | [English](readme_en.md)
+
 # 虚拟合唱团
+
+项目仓库：[3253473591/VirtualChoir](https://github.com/3253473591/VirtualChoir)
 
 **Windows 桌面端虚拟合唱空间渲染工具** — 将多轨独唱录音导入虚拟声场，在三维房间中摆放歌手位置，配置麦克风阵列与混响参数，渲染出具有空间感的立体声合唱混音。
 
