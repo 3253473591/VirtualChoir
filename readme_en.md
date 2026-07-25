@@ -8,8 +8,6 @@
 
 ## Getting Started
 
-### 1. Install Dependencies
-
 ```powershell
 git clone https://github.com/3253473591/VirtualChoir.git
 pip install -r requirements.txt
