@@ -9,5 +9,4 @@ requests>=2.31
 pyroomacoustics>=0.8
 sounddevice>=0.5
 librosa>=0.10
-pyworld>=0.3.4
 torchcrepe>=0.0.24

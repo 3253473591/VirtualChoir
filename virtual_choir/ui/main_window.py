@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from .room import RoomView
 from .task_callbacks import TaskCallbacks
 from .theme import Colors, Fonts, Spacing
 from .tracks import CollapsibleCard, TrackPanel
-from .widgets import MidiPathEdit, ParameterIntSpinBox, ParameterSpinBox, PreviewSlider
+from .widgets import MidiAddButton, MidiPathEdit, ParameterIntSpinBox, ParameterSpinBox, PreviewSlider
 from .workers import DuplicateWorker, RenderWorker
 
 
@@ -80,6 +81,11 @@ class MainWindow(
         self.customize_ai_action = QAction("AI 定制方案对话…", self, triggered=self.customize_with_ai)
 
         self.undo_ai_action = QAction("撤销 AI 方案", self, triggered=self.undo_ai_suggestion)
+        self.clear_preview_cache_action = QAction(
+            "清除预览缓存", self, triggered=self.clear_preview_cache,
+        )
+        self.clear_preview_cache_action.setToolTip("删除当前工程的 .render_cache 文件")
+
         self.undo_ai_action.setEnabled(False)
 
         self.choose_ai_action = QAction("切换 AI 方案…", self, triggered=self.choose_ai_suggestion)
@@ -103,6 +109,23 @@ class MainWindow(
                 return
         super().keyPressEvent(event)
 
+    def clear_preview_cache(self):
+        """Remove disposable room-render previews for the open project."""
+        if self.project_dir is None:
+            QMessageBox.information(self, "清除预览缓存", "请先打开或保存工程。")
+            return
+        cache_dir = self.project_dir / ".render_cache"
+        if not cache_dir.exists():
+            self._status.showMessage("没有可清除的预览缓存", 5000)
+            return
+        try:
+            shutil.rmtree(cache_dir)
+        except OSError as exc:
+            QMessageBox.warning(self, "清除预览缓存失败", str(exc))
+            return
+        self._status.showMessage("已清除预览缓存", 5000)
+        self._toast.show_message("已清除预览缓存", "success")
+
     def _build_menubar(self):
         file_menu = self.menuBar().addMenu("文件")
         file_menu.addActions([
@@ -117,7 +140,7 @@ class MainWindow(
         view_menu.addAction(self.toggle_right_action)
 
         ai_menu = self.menuBar().addMenu("AI")
-        ai_menu.addActions([self.settings_action, self.analyze_action, self.customize_ai_action, self.choose_ai_action, self.undo_ai_action])
+        ai_menu.addActions([self.settings_action, self.analyze_action, self.customize_ai_action, self.clear_preview_cache_action, self.choose_ai_action, self.undo_ai_action])
 
         help_menu = self.menuBar().addMenu("帮助")
         help_menu.addAction("快捷键", self._show_shortcuts)
@@ -133,7 +156,7 @@ class MainWindow(
             self.import_action, self.open_action, self.save_action
         ])
         toolbar.addSeparator()
-        toolbar.addActions([self.settings_action, self.analyze_action, self.customize_ai_action])
+        toolbar.addActions([self.settings_action, self.analyze_action, self.customize_ai_action, self.clear_preview_cache_action])
         self.addToolBar(toolbar)
 
     def _build_ui(self):
@@ -242,6 +265,47 @@ class MainWindow(
         layout.setContentsMargins(Spacing.MD, Spacing.MD, Spacing.MD, Spacing.MD)
         layout.setSpacing(Spacing.MD)
 
+        self._add_panel_group(layout, "输入", "输入与时间线")
+        self._midi_card = CollapsibleCard("MIDI 时间线", "按轨道分配颤音与音符起音偏移的参考时间线")
+        self._midi_card.setAccessibleName("参考 MIDI 折叠面板")
+        self.naturalization_enabled = QCheckBox("启用随机偏移")
+        self.naturalization_enabled.setToolTip("基于分配给各轨道的 MIDI 进行每音符起音随机微偏移")
+        self.naturalization_enabled.toggled.connect(self.set_naturalization_enabled)
+        self._midi_card.content_layout().addWidget(self.naturalization_enabled)
+
+        self.midi_list_layout = QVBoxLayout()
+        self.midi_list_layout.setSpacing(Spacing.SM)
+        self._midi_card.content_layout().addLayout(self.midi_list_layout)
+
+        # The add button is the sole empty-state control and accepts MIDI drops.
+        self.midi_empty_frame = QFrame()
+        self.midi_empty_frame.setVisible(False)
+        empty_layout = QVBoxLayout(self.midi_empty_frame)
+        self.reference_midi_input = MidiPathEdit()
+        self.reference_midi_input.setPlaceholderText("拖入 MIDI 或选择文件")
+        self.reference_midi_input.setAccessibleName("参考 MIDI 文件")
+        self.reference_midi_browse_button = QPushButton("选择")
+
+        self.add_midi_button = MidiAddButton("+ 添加 MIDI")
+        self.add_midi_button.setObjectName("secondary")
+        self.add_midi_button.clicked.connect(self.choose_reference_midi)
+        self.add_midi_button.midi_dropped.connect(self.add_reference_midis)
+        self._midi_card.content_layout().addWidget(self.add_midi_button)
+
+        # Kept as a compatibility hook for extensions written against the
+        # former single-MIDI widget. Per-item remove buttons are rendered below.
+        self.reference_midi_clear_button = QToolButton(self)
+        self.reference_midi_clear_button.hide()
+        self.reference_midi_clear_button.clicked.connect(self.clear_reference_midi)
+
+        self.naturalization_status = QLabel("未选择 MIDI")
+        self.naturalization_status.setWordWrap(True)
+        self.naturalization_status.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: 11px; border: none;"
+        )
+        self._midi_card.content_layout().addWidget(self.naturalization_status)
+        layout.addWidget(self._midi_card)
+
         self._add_panel_group(layout, "空间", "空间声学参数")
 
         # Room card
@@ -296,62 +360,14 @@ class MainWindow(
         self._mic_card.content_layout().addLayout(mic_form)
         layout.addWidget(self._mic_card)
 
-        self._add_panel_group(layout, "输入", "输入与时间线")
-        self._midi_card = CollapsibleCard("MIDI 时间线", "按轨道分配颤音与音符起音偏移的参考时间线")
-        self._midi_card.setAccessibleName("参考 MIDI 折叠面板")
-        self.naturalization_enabled = QCheckBox("启用随机偏移")
-        self.naturalization_enabled.setToolTip("基于分配给各轨道的 MIDI 进行每音符起音随机微偏移")
-        self.naturalization_enabled.toggled.connect(self.set_naturalization_enabled)
-        self._midi_card.content_layout().addWidget(self.naturalization_enabled)
-
-        self.midi_list_layout = QVBoxLayout()
-        self.midi_list_layout.setSpacing(Spacing.SM)
-        self._midi_card.content_layout().addLayout(self.midi_list_layout)
-
-        self.midi_empty_frame = QFrame()
-        self.midi_empty_frame.setObjectName("midiDropTarget")
-        empty_layout = QVBoxLayout(self.midi_empty_frame)
-        self.reference_midi_input = MidiPathEdit()
-        self.reference_midi_input.setPlaceholderText("拖入 MIDI 或选择文件")
-        self.reference_midi_input.setAccessibleName("参考 MIDI 文件")
-        self.reference_midi_input.midi_dropped.connect(self.add_reference_midi)
-        empty_layout.addWidget(self.reference_midi_input)
-        self.reference_midi_browse_button = QPushButton("选择")
-        self.reference_midi_browse_button.setObjectName("secondary")
-        self.reference_midi_browse_button.clicked.connect(self.choose_reference_midi)
-        empty_layout.addWidget(self.reference_midi_browse_button)
-        self.midi_list_layout.addWidget(self.midi_empty_frame)
-
-        self.add_midi_button = QPushButton("+ 添加 MIDI")
-        self.add_midi_button.setObjectName("secondary")
-        self.add_midi_button.clicked.connect(self.choose_reference_midi)
-        self._midi_card.content_layout().addWidget(self.add_midi_button)
-
-        # Kept as a compatibility hook for extensions written against the
-        # former single-MIDI widget. Per-item remove buttons are rendered below.
-        self.reference_midi_clear_button = QToolButton(self)
-        self.reference_midi_clear_button.hide()
-        self.reference_midi_clear_button.clicked.connect(self.clear_reference_midi)
-
-        self.naturalization_status = QLabel("未选择 MIDI")
-        self.naturalization_status.setWordWrap(True)
-        self.naturalization_status.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; font-size: 11px; border: none;"
-        )
-        self._midi_card.content_layout().addWidget(self.naturalization_status)
-        params = QLabel("参数：σ=2 ms · ±5 ms · 截断正态分布")
-        params.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 11px; border: none;")
-        self._midi_card.content_layout().addWidget(params)
-        layout.addWidget(self._midi_card)
-
         self._add_panel_group(layout, "AI", "AI 方案")
         self._ai_card = CollapsibleCard("AI 方案", "分析全部启用音轨并应用空间与混响建议")
         self._ai_card.setStyleSheet(
             "QFrame#collapsibleCard { background: #f0f7ff; border: 1px solid #0969da; border-radius: 6px; }"
         )
         self.ai_button = QPushButton("发送给 AI")
-        self.ai_button.setObjectName("primary")
-        self.ai_button.setStyleSheet("color: #ffffff;")
+        self.ai_button.setObjectName("aiSend")
+        self.ai_button.setToolTip('<span style="color: #000000;">将全部启用音轨发送给 AI 分析</span>')
         self.ai_button.setAccessibleName("发送给 AI 分析")
         self.ai_button.clicked.connect(self.analyze_with_ai)
         self._ai_card.content_layout().addWidget(self.ai_button)

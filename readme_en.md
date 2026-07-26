@@ -47,6 +47,6 @@ A: Delete the `.render_cache/` folder inside the project directory. The next ren
 
 ---
 
-Tech stack: Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · pyworld · torchcrepe · soundfile · sounddevice
+Tech stack: Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN · torchcrepe · soundfile · sounddevice
 
 *This project is for learning and research purposes only. Please ensure you have the appropriate rights before mixing third-party recordings.*

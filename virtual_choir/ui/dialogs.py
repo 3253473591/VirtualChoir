@@ -395,7 +395,18 @@ class MidiAssignmentDialog(QDialog):
             check = QCheckBox(f"{track.track_id}   {track.file_name}")
             check.setChecked(track.track_id in selected_ids)
             self._checks[track.track_id] = check
-            layout.addWidget(check)
+            track_row = QVBoxLayout()
+            track_row.setSpacing(2)
+            track_row.addWidget(check)
+            owner = self._track_owner_name(track.track_id, midi_name)
+            owner_text = (
+                f"{track.track_id} 已分配到 {owner} MIDI"
+                if owner else f"{track.track_id} 尚未分配 MIDI"
+            )
+            owner_label = QLabel(owner_text)
+            owner_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 11px;")
+            track_row.addWidget(owner_label)
+            layout.addLayout(track_row)
 
         actions = QHBoxLayout()
         select_all = QPushButton("全选")
@@ -420,6 +431,15 @@ class MidiAssignmentDialog(QDialog):
 
     def midi_track_index(self) -> int | None:
         return self.midi_track.currentData()
+
+    def _track_owner_name(self, track_id: str, current_midi_name: str) -> str | None:
+        assignments = self.project.naturalization.assignments
+        if len(assignments) == 1 and not assignments[0].track_ids:
+            return Path(current_midi_name).stem
+        for assignment in assignments:
+            if track_id in assignment.track_ids:
+                return Path(assignment.midi_path).stem
+        return None
 
 
 def _midi_pitch_range(lowest: int | None, highest: int | None) -> str:

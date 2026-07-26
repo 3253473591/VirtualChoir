@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtWidgets import (
-    QDoubleSpinBox, QLineEdit, QSlider, QSpinBox, QStyle, QStyleOptionSlider,
+    QDoubleSpinBox, QLineEdit, QPushButton, QSlider, QSpinBox, QStyle, QStyleOptionSlider,
     QStyleOptionSpinBox,
 )
 
@@ -143,9 +143,9 @@ class PreviewSlider(QSlider):
 
 
 class MidiPathEdit(QLineEdit):
-    """Read-only MIDI target that accepts a local .mid/.midi file drop."""
+    """Read-only MIDI target that accepts one or more local MIDI file drops."""
 
-    midi_dropped = Signal(str)
+    midi_dropped = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -162,10 +162,43 @@ class MidiPathEdit(QLineEdit):
         else:
             event.ignore()
 
+
+class MidiAddButton(QPushButton):
+    """Add-MIDI button that also accepts multiple MIDI file drops."""
+
+    midi_dropped = Signal(object)
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if any(
+            url.isLocalFile() and url.toLocalFile().lower().endswith((".mid", ".midi"))
+            for url in event.mimeData().urls()
+        ):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
     def dropEvent(self, event):
-        for url in event.mimeData().urls():
-            if url.isLocalFile() and url.toLocalFile().lower().endswith((".mid", ".midi")):
-                self.midi_dropped.emit(url.toLocalFile())
-                event.acceptProposedAction()
-                return
-        event.ignore()
+        paths = [
+            url.toLocalFile() for url in event.mimeData().urls()
+            if url.isLocalFile() and url.toLocalFile().lower().endswith((".mid", ".midi"))
+        ]
+        if paths:
+            self.midi_dropped.emit(paths)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        paths = [
+            url.toLocalFile() for url in event.mimeData().urls()
+            if url.isLocalFile() and url.toLocalFile().lower().endswith((".mid", ".midi"))
+        ]
+        if paths:
+            self.midi_dropped.emit(paths)
+            event.acceptProposedAction()
+        else:
+            event.ignore()

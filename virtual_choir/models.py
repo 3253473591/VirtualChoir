@@ -314,8 +314,10 @@ class TimbreVariationConfig:
 
     preset_level: int = 3
     formant_shift_range: tuple[float, float] = (-0.05, 0.05)
-    pitch_shift_cents_range: tuple[float, float] = (-10.0, 10.0)
-    pitch_line_cents_range: tuple[float, float] = (-7.0, 7.0)
+    pitch_shift_cents_range: tuple[float, float] = (-4.0, 4.0)
+    pitch_line_cents_range: tuple[float, float] = (-3.0, 3.0)
+    pitch_redraw_mix: float = 0.70
+    jitter_cents_range: tuple[float, float] = (0.7, 1.7)
     vowel_onset_db_range: tuple[float, float] = (-1.5, 1.5)
     dynamic_db_range: tuple[float, float] = (-1.5, 1.5)
     eq_mid_db_range: tuple[float, float] = (-1.5, 1.5)
@@ -325,27 +327,32 @@ class TimbreVariationConfig:
     vibrato_depth_cents_range: tuple[float, float] = (4.0, 18.0)
     vibrato_rate_hz_range: tuple[float, float] = (4.5, 6.5)
     vibrato_note_probability: float = 0.7
+    # Activation likelihoods for CREPE-classified (flat, light, natural,
+    # strong) source vibrato.  MIDI note boundaries make this per-note.
+    vibrato_activation_probabilities: tuple[float, float, float, float] = (
+        0.92, 0.78, 0.65, 0.50,
+    )
 
     @classmethod
     def from_preset(cls, level: int) -> "TimbreVariationConfig":
         """Return fixed ranges for a user-facing differentiation preset."""
         presets = {
-            1: ((-0.015, 0.015), (-3.0, 3.0), (-2.0, 2.0), (-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5), (0.001, 0.003)),
-            2: ((-0.03, 0.03), (-6.0, 6.0), (-4.0, 4.0), (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0), (0.002, 0.005)),
-            3: ((-0.05, 0.05), (-10.0, 10.0), (-7.0, 7.0), (-1.5, 1.5), (-1.5, 1.5), (-1.5, 1.5), (-1.5, 1.5), (0.003, 0.008)),
-            4: ((-0.07, 0.07), (-16.0, 16.0), (-11.0, 11.0), (-2.5, 2.5), (-2.5, 2.5), (-2.5, 2.5), (-2.5, 2.5), (0.005, 0.011)),
-            5: ((-0.10, 0.10), (-25.0, 25.0), (-18.0, 18.0), (-3.5, 3.5), (-4.0, 4.0), (-3.5, 3.5), (-3.5, 3.5), (0.008, 0.015)),
+            1: ((-0.015, 0.015), (-1.5, 1.5), (-3.0, 3.0), (-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5), (0.001, 0.003)),
+            2: ((-0.03, 0.03), (-2.5, 2.5), (-6.0, 6.0), (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0), (0.002, 0.005)),
+            3: ((-0.05, 0.05), (-4.0, 4.0), (-10.0, 10.0), (-1.5, 1.5), (-1.5, 1.5), (-1.5, 1.5), (-1.5, 1.5), (0.003, 0.008)),
+            4: ((-0.07, 0.07), (-6.0, 6.0), (-16.0, 16.0), (-2.5, 2.5), (-2.5, 2.5), (-2.5, 2.5), (-2.5, 2.5), (0.005, 0.011)),
+            5: ((-0.10, 0.10), (-9.0, 9.0), (-24.0, 24.0), (-3.5, 3.5), (-4.0, 4.0), (-3.5, 3.5), (-3.5, 3.5), (0.008, 0.015)),
         }
         try:
             values = presets[level]
         except KeyError as exc:
             raise ChoirError("PROJECT_SCHEMA_ERROR", "差异化预设必须为 1-5") from exc
         vibrato = {
-            1: ((1.0, 6.0), (4.5, 5.5), 0.35),
-            2: ((2.0, 11.0), (4.4, 5.9), 0.5),
-            3: ((4.0, 18.0), (4.3, 6.3), 0.65),
-            4: ((6.0, 27.0), (4.1, 6.8), 0.75),
-            5: ((8.0, 36.0), (3.9, 7.2), 0.85),
+            1: ((1.5, 4.5), (4.7, 5.4), 0.35, (0.75, 0.55, 0.35, 0.20), 0.50, (0.3, 0.8)),
+            2: ((2.5, 7.0), (4.5, 5.8), 0.50, (0.85, 0.68, 0.50, 0.35), 0.60, (0.5, 1.2)),
+            3: ((4.0, 11.0), (4.3, 6.2), 0.65, (0.92, 0.78, 0.65, 0.50), 0.70, (0.7, 1.7)),
+            4: ((6.0, 17.0), (4.1, 6.6), 0.78, (0.96, 0.88, 0.78, 0.68), 0.80, (0.9, 2.4)),
+            5: ((8.0, 25.0), (3.9, 7.0), 0.90, (0.99, 0.94, 0.88, 0.80), 0.95, (1.2, 3.2)),
         }[level]
         return cls(
             preset_level=level,
@@ -360,6 +367,9 @@ class TimbreVariationConfig:
             vibrato_depth_cents_range=vibrato[0],
             vibrato_rate_hz_range=vibrato[1],
             vibrato_note_probability=vibrato[2],
+            vibrato_activation_probabilities=vibrato[3],
+            pitch_redraw_mix=vibrato[4],
+            jitter_cents_range=vibrato[5],
         )
 
     def validate(self) -> None:
@@ -367,6 +377,7 @@ class TimbreVariationConfig:
             ("formant_shift_range", self.formant_shift_range),
             ("pitch_shift_cents_range", self.pitch_shift_cents_range),
             ("pitch_line_cents_range", self.pitch_line_cents_range),
+            ("jitter_cents_range", self.jitter_cents_range),
             ("vowel_onset_db_range", self.vowel_onset_db_range),
             ("dynamic_db_range", self.dynamic_db_range),
             ("eq_mid_db_range", self.eq_mid_db_range),
@@ -379,6 +390,13 @@ class TimbreVariationConfig:
                 raise ChoirError("PROJECT_SCHEMA_ERROR", f"TimbreVariationConfig.{name} 无效")
         if not isinstance(self.vibrato_note_probability, (int, float)) or not 0 <= self.vibrato_note_probability <= 1:
             raise ChoirError("PROJECT_SCHEMA_ERROR", "TimbreVariationConfig.vibrato_note_probability 无效")
+        if not isinstance(self.pitch_redraw_mix, (int, float)) or not 0 <= self.pitch_redraw_mix <= 1:
+            raise ChoirError("PROJECT_SCHEMA_ERROR", "TimbreVariationConfig.pitch_redraw_mix 无效")
+        if len(self.vibrato_activation_probabilities) != 4 or any(
+            not isinstance(value, (int, float)) or not 0 <= value <= 1
+            for value in self.vibrato_activation_probabilities
+        ):
+            raise ChoirError("PROJECT_SCHEMA_ERROR", "TimbreVariationConfig.vibrato_activation_probabilities 无效")
         if type(self.random_seed) is not int:
             raise ChoirError("PROJECT_SCHEMA_ERROR", "TimbreVariationConfig.random_seed 无效")
         if type(self.preset_level) is not int or not 1 <= self.preset_level <= 5:

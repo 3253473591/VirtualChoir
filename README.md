@@ -47,5 +47,5 @@ A：删除工程目录下的 `.render_cache/` 文件夹，下次渲染时将全�
 
 ---
 
-技术栈：Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · pyworld · torchcrepe · soundfile · sounddevice
+技术栈：Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN · torchcrepe · soundfile · sounddevice
 *本项目仅供学习和研究使用。使用他人录音作品进行混音时请确保拥有相关授权。*

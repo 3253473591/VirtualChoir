@@ -161,6 +161,24 @@ class ProjectWorkflowMixin:
 
         midi_assignment = midi_assignment_for_track(track_id, self.project.naturalization)
         assigned_midi = midi_assignment.midi_path if midi_assignment else None
+        if not assigned_midi:
+            notice = QMessageBox(self)
+            notice.setIcon(QMessageBox.Icon.Information)
+            notice.setWindowTitle("建议导入 MIDI")
+            notice.setText("当前轨道未分配 MIDI。")
+            notice.setInformativeText(
+                "导入 MIDI 后可按音符边界生成更自然的音高线和颤音行为；"
+                "也可以继续，程序会使用无 MIDI 的平滑随机音高线。"
+            )
+            import_button = notice.addButton("导入 MIDI", QMessageBox.ButtonRole.ActionRole)
+            continue_button = notice.addButton("仍然继续", QMessageBox.ButtonRole.AcceptRole)
+            notice.exec()
+            if notice.clickedButton() is import_button:
+                self.choose_reference_midi()
+                midi_assignment = midi_assignment_for_track(track_id, self.project.naturalization)
+                assigned_midi = midi_assignment.midi_path if midi_assignment else None
+            elif notice.clickedButton() is not continue_button:
+                return
         dialog = DuplicateTrackDialog(
             source_track, self.project_dir, assigned_midi, self,
         )
@@ -168,6 +186,17 @@ class ProjectWorkflowMixin:
             return
 
         opts = dialog.result()
+        if False and not assigned_midi:
+            notice = QMessageBox(self)
+            notice.setIcon(QMessageBox.Icon.Information)
+            notice.setWindowTitle("未分配 MIDI")
+            notice.setText("当前轨道未分配 MIDI。")
+            notice.setInformativeText(
+                "仍可继续生成差异化副本，但将使用无 MIDI 的平滑随机音高线，"
+                "无法按音符应用逐音符颤音行为。"
+            )
+            notice.setStandardButtons(QMessageBox.StandardButton.Ok)
+            notice.exec()
         if not self._ensure_project_saved("生成差异化副本"):
             return
         try:

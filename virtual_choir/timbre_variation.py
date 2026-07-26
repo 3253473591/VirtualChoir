@@ -1,8 +1,9 @@
 """Preset-based vocal differentiation for virtual choir copies.
 
 Each copy uses the same user-selected preset but a distinct deterministic
-seed. CREPE supplies the pitch contour, WORLD resynthesizes the formant and
-pitch variations, and librosa locates a high-energy vowel-like region.
+seed. CREPE supplies the pitch contour and OpenVPI PC-NSF-HiFiGAN renders it
+from the original Mel spectrum. Librosa locates a high-energy vowel-like
+region for the remaining post-processing.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ import os
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -24,25 +24,19 @@ from .cuda_acceleration import apply_pitch_cents, fft_convolve as cuda_fft_convo
 from .errors import ChoirError
 from .models import TimbreVariationConfig
 from .naturalization import LyricUnit, parse_midi_notes
+from .timbre_vocoder import (
+    MODEL_HOP_SAMPLES, VocoderAnalysis, analyze_voice as analyze_vocoder_voice,
+    synthesize as synthesize_vocoder,
+)
 
 _FFT_FILTER_THRESHOLD_SAMPLES = 480_000
 _FFT_FILTER_IMPULSE_SAMPLES = 8_192
 _CUDA_FFT_THRESHOLD_SAMPLES = 1_000_000
-_WORLD_FRAME_PERIOD_MS = 5.0
-_CREPE_HOP_SAMPLES = 240
-# WORLD is intentionally blended with the original recording to retain phase,
-# transients, and breath detail that a full vocoder resynthesis cannot recover.
-# Adjust this single value for future voicing tests: 0.70 means 70% WORLD.
-WORLD_WET_MIX = 0.70
+_F0_FRAME_PERIOD_MS = MODEL_HOP_SAMPLES * 1000.0 / 44_100
+_COPY_SUFFIX = "\u526f\u672c"
+JITTER_MIN_INTERVAL_MS = 80.0
+JITTER_MAX_INTERVAL_MS = 180.0
 
-
-@dataclass(frozen=True)
-class _WorldAnalysis:
-    f0: np.ndarray
-    spectral_envelope: np.ndarray
-    aperiodicity: np.ndarray
-    crepe_f0: np.ndarray
-    crepe_periodicity: np.ndarray
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -65,7 +59,7 @@ def generate_variations(
     Metadata (JSON) is written alongside each copy.
     """
     if copy_count < 1 or copy_count > 64:
-        raise ChoirError("PROJECT_SCHEMA_ERROR", "副本数量必须在 1-64 之间")
+        raise ChoirError("PROJECT_SCHEMA_ERROR", "??????? 1-64 ??")
 
     config = config or TimbreVariationConfig()
     config.validate()
@@ -79,12 +73,12 @@ def generate_variations(
 
     stem = source_path.stem
     written: list[Path] = []
-    # CREPE/WORLD analysis is shared by every copy. The expensive per-copy
-    # synthesis and post-processing are independent and can use CPU cores.
+    # CREPE/Mel analysis is shared. The generator itself is serialized because
+    # the CUDA model is shared by all copy jobs.
     if progress:
-        progress(2, "正在分析音高与共振峰…")
+        progress(2, "正在分析音高与频谱…")
     analysis = _analyze_voice(source, 48000, cancel_event)
-    analysis_cache: dict[str, _WorldAnalysis] = {"world": analysis}
+    analysis_cache: dict[str, VocoderAnalysis] = {"vocoder": analysis}
     jobs = []
     for idx in range(1, copy_count + 1):
         seed = _derive_seed(source_sha, idx)
@@ -113,14 +107,14 @@ def generate_variations(
                 if progress:
                     progress(
                         2 + round(completed / copy_count * 90),
-                        f"正在并行生成副本 {completed}/{copy_count}…",
+                        f"正在生成副本 {completed}/{copy_count}…",
                     )
     except ChoirError:
         _remove_generated_files(written)
         raise
     except Exception as exc:
         _remove_generated_files(written)
-        raise ChoirError("RENDER_FAILED", f"差异化处理失败：{exc}") from exc
+        raise ChoirError("RENDER_FAILED", f"宸紓鍖栧鐞嗗け璐ワ細{exc}") from exc
 
     for idx, seed, params in jobs:
         _check_cancel(cancel_event)
@@ -138,7 +132,7 @@ def generate_variations(
 def _process_copy(
     source: np.ndarray,
     params: dict,
-    analysis_cache: dict[str, _WorldAnalysis],
+    analysis_cache: dict[str, VocoderAnalysis],
     seed: int,
     cancel_event: threading.Event | None,
     midi_units: tuple[LyricUnit, ...] | None,
@@ -186,6 +180,8 @@ def _sample_params(rng: np.random.Generator, config: TimbreVariationConfig) -> d
         "formant_shift": round(_uniform(config.formant_shift_range), 4),
         "pitch_shift_cents": round(_uniform(config.pitch_shift_cents_range), 2),
         "pitch_line_cents": round(_uniform(config.pitch_line_cents_range), 2),
+        "pitch_redraw_mix": round(float(config.pitch_redraw_mix), 3),
+        "jitter_cents": round(_uniform(config.jitter_cents_range), 3),
         "vowel_onset_db": round(_uniform(config.vowel_onset_db_range), 2),
         "dynamic_db": round(_uniform(config.dynamic_db_range), 2),
         "eq_mid_db": round(_uniform(config.eq_mid_db_range), 2),
@@ -193,12 +189,15 @@ def _sample_params(rng: np.random.Generator, config: TimbreVariationConfig) -> d
         "breath_mix": round(_uniform(config.breath_mix_range), 4),
         "vibrato_depth_cents": round(_uniform(config.vibrato_depth_cents_range), 2),
         "vibrato_rate_hz": round(_uniform(config.vibrato_rate_hz_range), 3),
+        "vibrato_depth_cents_range": list(config.vibrato_depth_cents_range),
+        "vibrato_rate_hz_range": list(config.vibrato_rate_hz_range),
         "vibrato_note_probability": round(float(config.vibrato_note_probability), 3),
+        "vibrato_activation_probabilities": list(config.vibrato_activation_probabilities),
     }
 
 
 # ---------------------------------------------------------------------------
-# Timbre variation pipeline — each step is individually guarded so one
+# Timbre variation pipeline - each step is individually guarded so one
 # failure doesn't lose the whole copy.
 # ---------------------------------------------------------------------------
 
@@ -208,28 +207,29 @@ def _apply_timbre_variation(
     params: dict,
     sample_rate: int,
     rng: np.random.Generator,
-    analysis_cache: dict[str, _WorldAnalysis] | None = None,
+    analysis_cache: dict[str, VocoderAnalysis] | None = None,
     cancel_event: threading.Event | None = None,
     midi_units: tuple[LyricUnit, ...] | None = None,
 ) -> np.ndarray:
-    """Apply WORLD resynthesis followed by EQ, energy, dynamics and breath."""
+    """Apply PC-NSF-HiFiGAN rendering followed by colour and dynamics."""
     _check_cancel(cancel_event)
-    if analysis_cache is not None and "world" in analysis_cache:
-        analysis = analysis_cache["world"]
+    if analysis_cache is not None and "vocoder" in analysis_cache:
+        analysis = analysis_cache["vocoder"]
     else:
         analysis = _analyze_voice(source, sample_rate, cancel_event)
         if analysis_cache is not None:
-            analysis_cache["world"] = analysis
+            analysis_cache["vocoder"] = analysis
 
-    audio = _resynthesize_world(
+    audio = _resynthesize_pc_nsf_hifigan(
         analysis, params, sample_rate, rng, cancel_event, midi_units=midi_units,
     )
     audio = _match_length(audio, len(source))
-    dry = source.astype(np.float32, copy=False)
-    audio = dry * np.float32(1.0 - WORLD_WET_MIX) + audio * np.float32(WORLD_WET_MIX)
     _check_cancel(cancel_event)
 
-    # Preserve the existing post-processing controls after WORLD synthesis.
+    if abs(params["formant_shift"]) > 1e-6:
+        audio = _formant_shift_eq(audio, sample_rate, params["formant_shift"])
+
+    # Preserve the existing post-processing controls after neural synthesis.
     _check_cancel(cancel_event)
     if abs(params["eq_mid_db"]) > 0.05 or abs(params["eq_high_db"]) > 0.05:
         try:
@@ -246,8 +246,7 @@ def _apply_timbre_variation(
     except Exception:
         pass
 
-    # Breath is intentionally post-vocoder so it remains distinct from WORLD's
-    # aperiodicity component.
+    # Breath remains post-vocoder so it stays independently controllable.
     _check_cancel(cancel_event)
     if params["breath_mix"] > 1e-6:
         try:
@@ -264,85 +263,281 @@ def _apply_timbre_variation(
     return audio.astype(np.float32, copy=False)
 
 
-def _optional_dependencies():
-    """Load heavyweight audio dependencies only when the feature is used."""
-    try:
-        import librosa
-        import pyworld
-        import torch
-        import torchcrepe
-    except Exception as exc:
-        raise ChoirError(
-            "RENDER_DEPENDENCY_MISSING",
-            "差异化需要 librosa、pyworld、torch 和 torchcrepe；请安装 requirements.txt",
-        ) from exc
-    return librosa, pyworld, torch, torchcrepe
-
-
 def _analyze_voice(
-    source: np.ndarray, sample_rate: int, cancel_event: threading.Event | None
-) -> _WorldAnalysis:
-    """Analyze one source once; all copies reuse these expensive features."""
-    _check_cancel(cancel_event)
-    _librosa, pyworld, torch, torchcrepe = _optional_dependencies()
-    try:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = "full" if device == "cuda" else "tiny"
-        tensor = torch.from_numpy(source.astype(np.float32, copy=False)).unsqueeze(0)
-        with torch.no_grad():
-            crepe_f0, periodicity = torchcrepe.predict(
-                tensor, sample_rate, _CREPE_HOP_SAMPLES, 50, 1100,
-                model=model, batch_size=2048, device=device, return_periodicity=True,
-            )
-        crepe_f0_np = np.asarray(crepe_f0.squeeze(0).cpu(), dtype=np.float64)
-        periodicity_np = np.asarray(periodicity.squeeze(0).cpu(), dtype=np.float64)
-        f0, time_axis = pyworld.harvest(source.astype(np.float64), sample_rate, frame_period=_WORLD_FRAME_PERIOD_MS)
-        spectral = pyworld.cheaptrick(source.astype(np.float64), f0, time_axis, sample_rate)
-        aperiodicity = pyworld.d4c(source.astype(np.float64), f0, time_axis, sample_rate)
-    except Exception as exc:
-        raise ChoirError("RENDER_FAILED", f"CREPE/WORLD 音频分析失败：{exc}") from exc
-    _check_cancel(cancel_event)
-    return _WorldAnalysis(f0, spectral, aperiodicity, crepe_f0_np, periodicity_np)
+    source: np.ndarray, sample_rate: int, cancel_event: threading.Event | None,
+) -> VocoderAnalysis:
+    """Delegate heavyweight feature extraction to the vocoder boundary."""
+    if sample_rate != 48_000:
+        raise ChoirError("RENDER_FAILED", "???????? 48 kHz ??")
+    return analyze_vocoder_voice(source, cancel_event)
 
 
-def _resynthesize_world(
-    analysis: _WorldAnalysis,
+def _resynthesize_pc_nsf_hifigan(
+    analysis: VocoderAnalysis,
     params: dict,
     sample_rate: int,
     rng: np.random.Generator,
     cancel_event: threading.Event | None,
     midi_units: tuple[LyricUnit, ...] | None = None,
 ) -> np.ndarray:
-    """Use CREPE's contour to perturb WORLD F0 and warp its spectral envelope."""
-    _unused_librosa, pyworld, _torch, _torchcrepe = _optional_dependencies()
-    frame_count = len(analysis.f0)
-    world_times = np.arange(frame_count, dtype=np.float64) * (_WORLD_FRAME_PERIOD_MS / 1000.0)
-    crepe_times = np.arange(len(analysis.crepe_f0), dtype=np.float64) * (_CREPE_HOP_SAMPLES / sample_rate)
-    voiced_crepe = np.where(analysis.crepe_periodicity >= 0.2, analysis.crepe_f0, np.nan)
-    valid = np.isfinite(voiced_crepe) & (voiced_crepe > 0)
+    """Build the external F0 line and delegate waveform rendering."""
     f0 = analysis.f0.copy()
-    if valid.any():
-        crepe_on_world = np.interp(world_times, crepe_times[valid], voiced_crepe[valid])
-        f0 = np.where(analysis.f0 > 0, crepe_on_world, 0.0)
-
-    line = _smooth_random_line(frame_count, params["pitch_line_cents"], rng, midi_units)
-    vibrato = _build_vibrato_cents(f0, params, rng, midi_units)
-    cents = params["pitch_shift_cents"] + line + vibrato
-    f0 = _apply_f0_cents(f0, cents)
-    spectral = _warp_spectral_envelope(analysis.spectral_envelope, params["formant_shift"], sample_rate)
-    _check_cancel(cancel_event)
-    try:
-        output = pyworld.synthesize(f0, spectral, analysis.aperiodicity, sample_rate, _WORLD_FRAME_PERIOD_MS)
-    except Exception as exc:
-        raise ChoirError("RENDER_FAILED", f"WORLD 重合成失败：{exc}") from exc
-    return output.astype(np.float32, copy=False)
+    if midi_units:
+        # MIDI supplies note boundaries for gesture selection only.  It must not
+        # become an absolute pitch target: a valid MIDI can be octave-shifted
+        # or offset from the recorded take.
+        cents = _build_midi_pitch_transform_cents(f0, params, rng, midi_units)
+    else:
+        line = _smooth_random_line(len(f0), params["pitch_line_cents"], rng)
+        vibrato = _build_vibrato_cents(f0, params, rng, None)
+        jitter = _build_jitter_line(len(f0), params.get("jitter_cents", 0.0), rng)
+        cents = params["pitch_shift_cents"] + line + vibrato + jitter
+    return synthesize_vocoder(analysis, _apply_f0_cents(f0, cents), cancel_event)
 
 
 def _match_length(audio: np.ndarray, expected_length: int) -> np.ndarray:
-    """WORLD frame rounding must not change the copy's timeline length."""
+    """Neural framing and sample-rate conversion must keep the timeline."""
     if len(audio) >= expected_length:
         return audio[:expected_length]
     return np.pad(audio, (0, expected_length - len(audio)))
+
+
+def _build_midi_pitch_transform_cents(
+    f0: np.ndarray,
+    params: dict,
+    rng: np.random.Generator,
+    midi_units: tuple[LyricUnit, ...],
+) -> np.ndarray:
+    """Redraw the CREPE contour within MIDI note boundaries.
+
+    MIDI gives timing and note-local gesture boundaries, never an absolute F0
+    target.  This preserves a singer's recorded register even when the MIDI
+    arrangement is transposed or octave-displaced from the audio take.
+    """
+    result = np.full(len(f0), float(params.get("pitch_shift_cents", 0.0)), dtype=np.float64)
+    redraw_mix = float(params.get("pitch_redraw_mix", 0.0))
+    amplitude = abs(float(params.get("pitch_line_cents", 0.0)))
+    jitter_amplitude = abs(float(params.get("jitter_cents", 0.0)))
+    decisions: list[dict] = []
+
+    for unit in midi_units:
+        left = max(0, int(round(unit.start_s * 1000 / _F0_FRAME_PERIOD_MS)))
+        right = min(len(f0), int(round(unit.end_s * 1000 / _F0_FRAME_PERIOD_MS)))
+        if right <= left:
+            continue
+        segment = f0[left:right]
+        voiced = np.isfinite(segment) & (segment > 0)
+        if not voiced.any():
+            continue
+
+        # Analyse the source gesture around its own local register rather than
+        # the MIDI pitch.  This retains CREPE-guided vibrato classification but
+        # cannot accidentally apply an octave-sized correction.
+        original_offset = np.zeros(right - left, dtype=np.float64)
+        reference_hz = float(np.median(segment[voiced]))
+        original_offset[voiced] = 1200.0 * np.log2(segment[voiced] / reference_hz)
+        redraw_offset = _build_note_redraw_curve(right - left, amplitude, rng)
+        vibrato, decision = _build_crepe_guided_vibrato(
+            original_offset, voiced, params, rng,
+            duration_s=max(0.0, unit.end_s - unit.start_s),
+        )
+        jitter = _build_jitter_line(right - left, jitter_amplitude, rng)
+        # This is the same additive, source-F0-relative redraw model used by
+        # the standalone listening experiment.  The preset percentage controls
+        # how much of the generated contour is applied.
+        target_delta = redraw_mix * (redraw_offset + vibrato + jitter)
+        target_delta *= _voiced_boundary_envelope(voiced)
+        note_result = result[left:right]
+        note_result[voiced] += target_delta[voiced]
+        result[left:right] = note_result
+        decision.update({
+            "midi_pitch": int(unit.pitch),
+            "midi_pitch_role": "note_boundary_only",
+            "redraw_mix": round(redraw_mix, 3),
+            "start_s": round(float(unit.start_s), 4),
+            "end_s": round(float(unit.end_s), 4),
+        })
+        decisions.append(decision)
+
+    # Metadata is intentionally compact but records the generated note
+    # behaviours so a rendered copy can be inspected after listening.
+    params["pitch_redraw_decisions"] = decisions
+    params["midi_pitch_role"] = "note_boundaries_only"
+    return result
+
+
+def _voiced_boundary_envelope(voiced: np.ndarray) -> np.ndarray:
+    """Fade F0 edits around actual voiced-segment boundaries.
+
+    MIDI note boundaries can precede the singer's consonant onset.  CREPE's
+    voiced mask is the reliable guard for avoiding F0 changes on those brief
+    transients, which are especially audible in neural-vocoder output.
+    """
+    envelope = np.zeros(len(voiced), dtype=np.float64)
+    changes = np.diff(np.pad(np.asarray(voiced, dtype=np.int8), (1, 1)))
+    starts = np.flatnonzero(changes == 1)
+    stops = np.flatnonzero(changes == -1)
+    for start, stop in zip(starts, stops):
+        envelope[start:stop] = 1.0
+        fade = min(3, max(1, (stop - start) // 3))
+        envelope[start:start + fade] *= np.linspace(0.0, 1.0, fade)
+        envelope[stop - fade:stop] *= np.linspace(1.0, 0.0, fade)
+    return envelope
+
+
+def _build_note_redraw_curve(length: int, amplitude_cents: float, rng: np.random.Generator) -> np.ndarray:
+    """Create a low-frequency, non-periodic note contour in cents."""
+    if length <= 0 or amplitude_cents < 1e-6:
+        return np.zeros(length, dtype=np.float64)
+    if length < 8:
+        return np.zeros(length, dtype=np.float64)
+    anchor_count = max(2, min(6, int(np.ceil(length / 40)) + 1))
+    anchors = rng.uniform(-amplitude_cents, amplitude_cents, anchor_count)
+    curve = np.interp(np.arange(length), np.linspace(0, length - 1, anchor_count), anchors)
+    window = min(length // 2 * 2 - 1, 31)
+    if window >= 5:
+        curve = signal.savgol_filter(curve, window, 2)
+    # Avoid a per-note transposition and ease back to the source F0 at note
+    # boundaries, where an F0 step is particularly audible to the vocoder.
+    curve -= float(np.mean(curve))
+    # Preserve consonant onsets and releases from F0 redraw artifacts.
+    fade = min(12, max(1, length // 3))
+    curve[:fade] *= np.linspace(0.0, 1.0, fade)
+    curve[-fade:] *= np.linspace(1.0, 0.0, fade)
+    return curve
+
+
+def _build_jitter_line(length: int, amplitude_cents: float, rng: np.random.Generator) -> np.ndarray:
+    """Generate small, aperiodic and short-correlated human pitch jitter."""
+    if length <= 1 or amplitude_cents < 1e-6:
+        return np.zeros(length, dtype=np.float64)
+    # Slower 80-180 ms anchors keep the motion human without turning into FM.
+    spacing = max(4, int(round(rng.uniform(
+        JITTER_MIN_INTERVAL_MS / 1000.0,
+        JITTER_MAX_INTERVAL_MS / 1000.0,
+    ) * 1000 / _F0_FRAME_PERIOD_MS)))
+    anchors = rng.uniform(-amplitude_cents, amplitude_cents, max(2, int(np.ceil(length / spacing)) + 1))
+    curve = np.interp(np.arange(length), np.linspace(0, length - 1, len(anchors)), anchors)
+    if length >= 5:
+        window = min(length // 2 * 2 - 1, 7)
+        if window >= 5:
+            curve = signal.savgol_filter(curve, window, 2)
+    fade = min(12, max(1, length // 3))
+    curve[:fade] *= np.linspace(0.0, 1.0, fade)
+    curve[-fade:] *= np.linspace(1.0, 0.0, fade)
+    return curve
+
+
+def _analyze_crepe_vibrato(offset_cents: np.ndarray, voiced: np.ndarray) -> tuple[float, float]:
+    """Estimate periodic vibrato depth/rate after removing slow pitch motion."""
+    values = offset_cents[voiced]
+    if len(values) < 60:  # 300 ms is too short for a reliable vibrato reading.
+        return 0.0, 0.0
+    window = min(len(values) // 2 * 2 - 1, 101)
+    trend = signal.savgol_filter(values, window, 2) if window >= 5 else np.full_like(values, np.mean(values))
+    residual = values - trend
+    frequencies = np.fft.rfftfreq(len(residual), _F0_FRAME_PERIOD_MS / 1000.0)
+    spectrum = np.abs(np.fft.rfft(residual))
+    band = (frequencies >= 3.5) & (frequencies <= 8.0)
+    if not band.any() or float(np.max(spectrum[band])) < 1e-6:
+        return 0.0, 0.0
+    rate = float(frequencies[band][np.argmax(spectrum[band])])
+    depth = float(np.percentile(np.abs(residual), 90))
+    return depth, rate
+
+
+def _build_crepe_guided_vibrato(
+    original_offset: np.ndarray,
+    voiced: np.ndarray,
+    params: dict,
+    rng: np.random.Generator,
+    duration_s: float | None = None,
+) -> tuple[np.ndarray, dict]:
+    """Select a note gesture from CREPE's detected original vibrato."""
+    curve = np.zeros(len(original_offset), dtype=np.float64)
+    if duration_s is None:
+        duration_s = len(curve) * _F0_FRAME_PERIOD_MS / 1000.0
+    source_depth, source_rate = _analyze_crepe_vibrato(original_offset, voiced)
+    category = 0 if source_depth < 3.0 else 1 if source_depth < 8.0 else 2 if source_depth < 20.0 else 3
+    decision = {
+        "source_vibrato": ("flat", "light", "natural", "strong")[category],
+        "source_depth_cents": round(source_depth, 3),
+        "source_rate_hz": round(source_rate, 3),
+    }
+    if duration_s <= 0.250:
+        decision.update({"mode": "short_note_suppressed", "enabled": False})
+        return curve, decision
+
+    probabilities = params.get("vibrato_activation_probabilities", (0.7, 0.6, 0.5, 0.4))
+    if rng.random() > float(probabilities[category]):
+        decision.update({"mode": "not_selected", "enabled": False})
+        return curve, decision
+
+    low_depth, high_depth = params["vibrato_depth_cents_range"] if "vibrato_depth_cents_range" in params else (
+        max(0.0, params.get("vibrato_depth_cents", 0.0) * 0.6), params.get("vibrato_depth_cents", 0.0),
+    )
+    low_rate, high_rate = params["vibrato_rate_hz_range"] if "vibrato_rate_hz_range" in params else (
+        params.get("vibrato_rate_hz", 5.0), params.get("vibrato_rate_hz", 5.0),
+    )
+    base_depth = float(rng.uniform(low_depth, high_depth))
+    base_rate = float(rng.uniform(low_rate, high_rate))
+    if category == 0:
+        mode = str(rng.choice(("full", "late", "early_flat"), p=(0.45, 0.40, 0.15)))
+        depth, rate = base_depth, base_rate
+    else:
+        modes = ("stable", "soften", "strengthen", "slower", "faster", "full", "early_flat", "late")
+        mode = str(rng.choice(modes, p=(0.18, 0.18, 0.14, 0.10, 0.10, 0.10, 0.10, 0.10)))
+        source_rate = source_rate if source_rate > 0 else base_rate
+        depth = float(np.clip(source_depth, low_depth, high_depth))
+        rate = float(np.clip(source_rate, low_rate, high_rate))
+        if mode == "stable":
+            depth = 0.0
+        elif mode == "soften":
+            depth *= float(rng.uniform(0.40, 0.75))
+        elif mode == "strengthen":
+            depth = min(high_depth, max(base_depth, source_depth * rng.uniform(1.25, 1.65)))
+        elif mode == "slower":
+            rate = float(np.clip(source_rate * rng.uniform(0.75, 0.90), low_rate, high_rate))
+        elif mode == "faster":
+            rate = float(np.clip(source_rate * rng.uniform(1.10, 1.30), low_rate, high_rate))
+
+    if depth <= 1e-6:
+        decision.update({"mode": mode, "enabled": True, "target_depth_cents": 0.0, "target_rate_hz": round(rate, 3)})
+        return curve, decision
+
+    envelope = _vibrato_envelope(len(curve), mode, rng)
+    frames = np.arange(len(curve), dtype=np.float64)
+    phase = rng.uniform(0.0, 2.0 * np.pi)
+    curve[voiced] = depth * envelope[voiced] * np.sin(
+        2.0 * np.pi * rate * frames[voiced] * (_F0_FRAME_PERIOD_MS / 1000.0) + phase
+    )
+    decision.update({
+        "mode": mode,
+        "enabled": True,
+        "target_depth_cents": round(float(depth), 3),
+        "target_rate_hz": round(float(rate), 3),
+    })
+    return curve, decision
+
+
+def _vibrato_envelope(length: int, mode: str, rng: np.random.Generator) -> np.ndarray:
+    envelope = np.ones(length, dtype=np.float64)
+    if mode == "early_flat":
+        start = int(round(length * rng.uniform(0.45, 0.60)))
+        stop = min(length, int(round(length * rng.uniform(0.65, 0.85))))
+        if stop > start:
+            envelope[start:stop] = np.linspace(1.0, 0.0, stop - start)
+            envelope[stop:] = 0.0
+    elif mode == "late":
+        start = int(round(length * rng.uniform(0.15, 0.35)))
+        stop = min(length, start + max(1, int(round(length * 0.18))))
+        envelope[:start] = 0.0
+        if stop > start:
+            envelope[start:stop] = np.linspace(0.0, 1.0, stop - start)
+    edge = min(10, max(1, length // 8))
+    envelope[:edge] *= np.linspace(0.0, 1.0, edge)
+    envelope[-edge:] *= np.linspace(1.0, 0.0, edge)
+    return envelope
 
 
 def _smooth_random_line(
@@ -357,13 +552,13 @@ def _smooth_random_line(
     if midi_units:
         curve = np.zeros(length, dtype=np.float64)
         centers = np.array([
-            ((unit.start_s + unit.end_s) / 2) * 1000 / _WORLD_FRAME_PERIOD_MS
+            ((unit.start_s + unit.end_s) / 2) * 1000 / _F0_FRAME_PERIOD_MS
             for unit in midi_units
         ], dtype=np.float64)
         centers = np.clip(centers, 0, length - 1)
         values = rng.uniform(-amplitude_cents, amplitude_cents, len(centers))
-        left = max(0, int(round(midi_units[0].start_s * 1000 / _WORLD_FRAME_PERIOD_MS)))
-        right = min(length, int(round(midi_units[-1].end_s * 1000 / _WORLD_FRAME_PERIOD_MS)))
+        left = max(0, int(round(midi_units[0].start_s * 1000 / _F0_FRAME_PERIOD_MS)))
+        right = min(length, int(round(midi_units[-1].end_s * 1000 / _F0_FRAME_PERIOD_MS)))
         if right > left:
             curve[left:right] = np.interp(
                 np.arange(left, right), centers, values, left=values[0], right=values[-1]
@@ -404,8 +599,8 @@ def _build_vibrato_cents(
         return curve
     if midi_units:
         for unit in midi_units:
-            left = max(0, int(round(unit.start_s * 1000 / _WORLD_FRAME_PERIOD_MS)))
-            right = min(len(curve), int(round(unit.end_s * 1000 / _WORLD_FRAME_PERIOD_MS)))
+            left = max(0, int(round(unit.start_s * 1000 / _F0_FRAME_PERIOD_MS)))
+            right = min(len(curve), int(round(unit.end_s * 1000 / _F0_FRAME_PERIOD_MS)))
             _add_vibrato_window(curve, left, right, params, rng)
     else:
         _add_fallback_vibrato(curve, f0, params, rng)
@@ -420,11 +615,11 @@ def _add_fallback_vibrato(
     changes = np.diff(np.pad(voiced, (1, 1)))
     starts = np.flatnonzero(changes == 1)
     stops = np.flatnonzero(changes == -1)
-    min_frames = max(1, int(round(0.35 * 1000 / _WORLD_FRAME_PERIOD_MS)))
+    min_frames = max(1, int(round(0.35 * 1000 / _F0_FRAME_PERIOD_MS)))
     for start, stop in zip(starts, stops):
         left = int(start)
         while left < stop:
-            section = int(round(rng.uniform(0.8, 2.0) * 1000 / _WORLD_FRAME_PERIOD_MS))
+            section = int(round(rng.uniform(0.8, 2.0) * 1000 / _F0_FRAME_PERIOD_MS))
             right = min(int(stop), left + max(section, min_frames))
             _add_vibrato_window(curve, left, right, params, rng)
             left = right
@@ -436,9 +631,11 @@ def _add_vibrato_window(
     """Add one delayed, tapered vibrato gesture to a note or voiced section."""
     if rng.random() > params["vibrato_note_probability"]:
         return
-    frame_s = _WORLD_FRAME_PERIOD_MS / 1000.0
-    minimum = max(1, int(round(0.22 / frame_s)))
-    if right - left < minimum:
+    frame_s = _F0_FRAME_PERIOD_MS / 1000.0
+    # Notes under 250 ms retain the random pitch-line offset but do not receive
+    # periodic vibrato, which otherwise reads as an artificial flutter.
+    minimum = max(1, int(round(0.25 / frame_s)))
+    if right - left <= minimum:
         return
     delay = min(int(round(rng.uniform(0.08, 0.20) / frame_s)), (right - left) // 4)
     left += delay
@@ -465,32 +662,14 @@ def _apply_f0_cents(f0: np.ndarray, cents: np.ndarray) -> np.ndarray:
     return np.where(f0 > 0, f0 * np.exp2(cents / 1200.0), 0.0)
 
 
-def _warp_spectral_envelope(spectral: np.ndarray, shift_ratio: float, sample_rate: int) -> np.ndarray:
-    if abs(shift_ratio) < 1e-8:
-        return spectral.copy()
-    bins = spectral.shape[1]
-    frequencies = np.linspace(0.0, sample_rate / 2, bins)
-    source_frequencies = np.clip(frequencies / (1.0 + shift_ratio), 0.0, sample_rate / 2)
-    warped = np.empty_like(spectral)
-    # The interpolation positions are identical for every WORLD frame. Process
-    # rows in bounded batches to remove the per-frame Python loop without
-    # allocating a copy of the entire multi-minute spectral envelope at once.
-    positions = source_frequencies / (sample_rate / 2) * (bins - 1)
-    lower = np.floor(positions).astype(np.intp)
-    upper = np.minimum(lower + 1, bins - 1)
-    fraction = (positions - lower).astype(spectral.dtype, copy=False)
-    for start in range(0, len(spectral), 256):
-        stop = min(start + 256, len(spectral))
-        rows = spectral[start:stop]
-        warped[start:stop] = rows[:, lower] * (1.0 - fraction) + rows[:, upper] * fraction
-    return warped
-
-
 def _apply_vowel_energy_gain(audio: np.ndarray, sample_rate: int, gain_db: float) -> np.ndarray:
     """Apply a gain shape at the rise into the strongest RMS energy region."""
     if abs(gain_db) < 0.01 or not len(audio):
         return audio
-    librosa, _pyworld, _torch, _torchcrepe = _optional_dependencies()
+    try:
+        import librosa
+    except Exception as exc:
+        raise ChoirError("RENDER_DEPENDENCY_MISSING", "音色差异化需要 librosa；请安装 requirements.txt") from exc
     hop_length = 512
     rms = librosa.feature.rms(y=audio.astype(np.float32), frame_length=2048, hop_length=hop_length)[0]
     if not len(rms) or float(np.max(rms)) < 1e-8:
@@ -520,14 +699,14 @@ def _apply_dynamic_variation(
 
 
 # ---------------------------------------------------------------------------
-# (1) Formant shift — multi-band EQ with frequency-shifted centre frequencies
+# (1) Formant shift 鈥?multi-band EQ with frequency-shifted centre frequencies
 # ---------------------------------------------------------------------------
 
 # Nominal formant centre frequencies for an average adult voice (Hz).
 # We use four peaking filters.  A positive *shift_ratio* moves each centre
-# frequency slightly higher (→ brighter / "smaller" timbre); negative → darker.
+# frequency slightly higher (鈫?brighter / "smaller" timbre); negative 鈫?darker.
 _FORMANT_BANDS: list[tuple[float, float]] = [
-    (500.0, 1.2),     # F1 region — centre 500 Hz, Q ≈ 1.2
+    (500.0, 1.2),     # F1 region 鈥?centre 500 Hz, Q 鈮?1.2
     (1500.0, 1.5),    # F2 region
     (2500.0, 2.0),    # F3 region
     (3700.0, 2.5),    # F4 region
@@ -542,7 +721,7 @@ def _formant_shift_eq(audio: np.ndarray, sr: int, shift_ratio: float) -> np.ndar
     """Shift formant perception using frequency-warped peaking EQ bands.
 
     This replaces the per-frame LPC pole-warping approach.  For micro-shifts
-    (±5 %) the perceptual result is equivalent while running orders of
+    (卤5 %) the perceptual result is equivalent while running orders of
     magnitude faster and with guaranteed numerical stability.
     """
     nyq = sr / 2
@@ -553,7 +732,7 @@ def _formant_shift_eq(audio: np.ndarray, sr: int, shift_ratio: float) -> np.ndar
         f_shifted = f0 * (1.0 + shift_ratio)
         f_norm = max(0.001, min(0.999, f_shifted / nyq))
 
-        # Gain: positive shift → boost upper formants, cut lower ones
+        # Gain: positive shift 鈫?boost upper formants, cut lower ones
         if f0 < 800:
             gain_db = -_FORMANT_GAIN_DB * shift_ratio / 0.05
         elif f0 < 2000:
@@ -572,7 +751,7 @@ def _formant_shift_eq(audio: np.ndarray, sr: int, shift_ratio: float) -> np.ndar
 
 
 # ---------------------------------------------------------------------------
-# (2) Pitch micro-shift — resample + time-stretch
+# (2) Pitch micro-shift 鈥?resample + time-stretch
 # ---------------------------------------------------------------------------
 
 
@@ -580,7 +759,7 @@ def _pitch_shift_cents(audio: np.ndarray, cents: float) -> np.ndarray:
     """Shift pitch by *cents* (100 cents = 1 semitone) preserving duration.
 
     Resamples by ratio = 2^(cents/1200), then linearly stretches back
-    to original length.  For micro-adjustments (≤ ±20 cents) the artefacts
+    to original length.  For micro-adjustments (鈮?卤20 cents) the artefacts
     are negligible.
     """
     ratio = 2.0 ** (cents / 1200.0)
@@ -599,18 +778,18 @@ def _pitch_shift_cents(audio: np.ndarray, cents: float) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# (3) Multi-band EQ — cascade of biquad (second-order sections)
+# (3) Multi-band EQ 鈥?cascade of biquad (second-order sections)
 # ---------------------------------------------------------------------------
 
 
 def _apply_eq(
     audio: np.ndarray, sr: int, mid_db: float, high_db: float
 ) -> np.ndarray:
-    """Apply mid-band (800–3000 Hz) and high-shelf (>4000 Hz) EQ."""
+    """Apply mid-band (800鈥?000 Hz) and high-shelf (>4000 Hz) EQ."""
     nyq = sr / 2
     sos_list = []
 
-    # Mid peaking filter: centre ~1500 Hz, Q ≈ 1.0
+    # Mid peaking filter: centre ~1500 Hz, Q 鈮?1.0
     if abs(mid_db) > 0.05:
         sos_list.append(_peaking_eq_sos(1500 / nyq, mid_db, Q=1.0))
 
@@ -678,7 +857,7 @@ def _high_shelf_sos(f0_norm: float, gain_db: float, Q: float = 1.2) -> np.ndarra
 
 
 # ---------------------------------------------------------------------------
-# (4) Breath overlay — band-pass filtered pink noise
+# (4) Breath overlay 鈥?band-pass filtered pink noise
 # ---------------------------------------------------------------------------
 
 
@@ -689,7 +868,7 @@ def _mix_breath(
     rng: np.random.Generator,
     cancel_event: threading.Event | None = None,
 ) -> np.ndarray:
-    """Mix band-pass filtered pink noise (2–6 kHz) into non-silent segments."""
+    """Mix band-pass filtered pink noise (2鈥? kHz) into non-silent segments."""
     n = len(audio)
 
     # Pink noise (~1/f spectrum)
@@ -697,7 +876,7 @@ def _mix_breath(
     _check_cancel(cancel_event)
     pink = _pink_noise(white, cancel_event)
 
-    # Band-pass 2000–6000 Hz (breath / fricative band)
+    # Band-pass 2000鈥?000 Hz (breath / fricative band)
     nyq = sr / 2
     sos_bp = signal.butter(4, [2000 / nyq, 6000 / nyq], btype="band", output="sos")
     filtered = signal.sosfilt(sos_bp, pink)
@@ -775,10 +954,10 @@ def _rms_envelope(signal_abs: np.ndarray, sr: int, window_ms: float = 30.0) -> n
 
 
 def _find_available_path(output_dir: Path, stem: str, start_index: int) -> Path:
-    """Find an unused file name like ``stem_副本N.wav``."""
+    """Find an unused copy filename without depending on console encoding."""
     idx = start_index
     while True:
-        candidate = output_dir / f"{stem}_副本{idx}.wav"
+        candidate = output_dir / f"{stem}_{_COPY_SUFFIX}{idx}.wav"
         if not candidate.exists():
             return candidate
         idx += 1
@@ -800,7 +979,8 @@ def _write_meta(
         "copy_index": copy_index,
         "seed": seed,
         "preset_level": preset_level,
-        "engine": "crepe_world_librosa_v2",
+        "engine": "crepe_pc_nsf_hifigan_v1",
+        "vocoder_checkpoint_license": "CC BY-NC-SA 4.0",
         "params": params,
     }
     try:

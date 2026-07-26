@@ -17,9 +17,9 @@ from .cuda_acceleration import create_linear_sampler
 from .errors import ChoirError
 from .models import NaturalizationConfig, midi_assignment_for_track
 
-NATURALIZATION_VERSION = "1.1.0"
-OFFSET_STDDEV_MS = 2.0
-OFFSET_LIMIT_MS = 5.0
+NATURALIZATION_VERSION = "1.2.0"
+OFFSET_STDDEV_MS = 3.0
+OFFSET_LIMIT_MS = 10.0
 _INTERPOLATION_CHUNK_SAMPLES = 262_144
 _CUDA_INTERPOLATION_THRESHOLD_SAMPLES = 1_000_000
 Progress = Callable[[int, str], None]
@@ -283,11 +283,16 @@ def apply_local_time_shifts(
             continue
 
         shift = record.offset_ms * sample_rate / 1000.0
+        # Consonants carry the sharpest onset transients.  Keep their first
+        # 20 ms untouched, then ease the timing offset into the vowel body.
+        attack_end = min(right - 2, center + int(round(0.020 * sample_rate)))
+        if attack_end <= center or right - attack_end < 3:
+            continue
         output_positions = np.arange(left, right, dtype=np.float64)
         mapped = np.interp(
             output_positions,
-            np.array([left, center, right - 1], dtype=np.float64),
-            np.array([left, center - shift, right - 1], dtype=np.float64),
+            np.array([left, attack_end, right - 1], dtype=np.float64),
+            np.array([left, attack_end - shift, right - 1], dtype=np.float64),
         )
         np.clip(mapped, 0, length - 1, out=mapped)
         warped = np.empty(right - left, dtype=np.float32)
@@ -303,13 +308,17 @@ def apply_local_time_shifts(
                 )
         _check_cancel(cancel_event)
 
-        local_center = max(1, min(center - left, right - left - 1))
-        blend = np.empty(right - left, dtype=np.float32)
-        blend[:local_center] = np.sin(
-            np.linspace(0.0, np.pi / 2, local_center, endpoint=False, dtype=np.float32)
+        blend = np.zeros(right - left, dtype=np.float32)
+        local_attack_end = attack_end - left
+        fade_samples = min(int(round(0.012 * sample_rate)), max(1, (right - attack_end) // 3))
+        fade_end = min(len(blend), local_attack_end + fade_samples)
+        blend[local_attack_end:fade_end] = np.sin(
+            np.linspace(0.0, np.pi / 2, fade_end - local_attack_end, endpoint=False, dtype=np.float32)
         ) ** 2
-        blend[local_center:] = np.cos(
-            np.linspace(0.0, np.pi / 2, right - left - local_center, endpoint=True, dtype=np.float32)
+        release_start = max(fade_end, len(blend) - fade_samples)
+        blend[fade_end:release_start] = 1.0
+        blend[release_start:] = np.cos(
+            np.linspace(0.0, np.pi / 2, len(blend) - release_start, endpoint=True, dtype=np.float32)
         ) ** 2
         original = source[left:right]
         result[left:right] = original * (1.0 - blend) + warped * blend

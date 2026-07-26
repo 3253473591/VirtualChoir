@@ -83,10 +83,8 @@ class WindowStateMixin:
                 item.widget().hide()
                 item.widget().deleteLater()
         assignments = self.project.naturalization.assignments
-        self.midi_empty_frame.setVisible(not assignments)
+        self.midi_empty_frame.setVisible(False)
         if not assignments:
-            self.reference_midi_input.setText("")
-            self.midi_list_layout.addWidget(self.midi_empty_frame)
             return
 
         for index, assignment in enumerate(assignments):
@@ -98,7 +96,7 @@ class WindowStateMixin:
             input_box.setText(Path(assignment.midi_path).name)
             input_box.setToolTip(f"{assignment.midi_path}\n拖入 MIDI 可替换此时间线")
             input_box.midi_dropped.connect(
-                lambda path, item_index=index: self.replace_reference_midi(item_index, path)
+                lambda paths, item_index=index: self.replace_reference_midi(item_index, paths[0])
             )
             layout.addWidget(input_box)
             row = QHBoxLayout()
@@ -125,15 +123,11 @@ class WindowStateMixin:
             self.midi_list_layout.addWidget(frame)
 
     def _assignment_label(self, assignment: MidiAssignment) -> str:
-        midi_track = (
-            f"MIDI 音轨 {assignment.midi_track_index + 1}"
-            if assignment.midi_track_index is not None else "自动选择首条有音符 MIDI 音轨"
-        )
         if len(self.project.naturalization.assignments) == 1 and not assignment.track_ids:
-            return f"{midi_track} · 负责所有已启用轨道"
-        if assignment.track_ids:
-            return f"{midi_track} · 负责 {len(assignment.track_ids)} 条轨道：{'、'.join(assignment.track_ids)}"
-        return f"{midi_track} · 尚未分配轨道"
+            count = sum(track.enabled for track in self.project.tracks)
+        else:
+            count = len(assignment.track_ids)
+        return f"负责 {count} 条轨道"
 
     def _midi_assignment_summary(self) -> str:
         assignments = self.project.naturalization.assignments
@@ -145,7 +139,7 @@ class WindowStateMixin:
         assigned = {track_id for assignment in assignments for track_id in assignment.track_ids}
         missing = sorted(enabled_ids - assigned)
         if missing:
-            return f"{ '、'.join(missing) } 未分配 MIDI，将不参与偏移和逐音符颤音"
+            return f"尚有 {len(missing)} 条启用轨道未分配 MIDI，将不参与偏移和逐音符颤音"
         return "所有启用轨道均已分配 MIDI；副本将使用逐音符颤音"
 
     def _sync_track_dependent_controls(self):
@@ -154,21 +148,27 @@ class WindowStateMixin:
         self.analyze_action.setEnabled(has_tracks)
         self.ai_customize_button.setEnabled(has_tracks)
         tooltip = "请先导入至少一条音轨" if not has_tracks else "将全部启用音轨发送给 AI 分析"
-        self.ai_button.setToolTip(tooltip)
+        self.ai_button.setToolTip(f'<span style="color: #000000;">{tooltip}</span>')
 
     def choose_reference_midi(self):
-        path, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self, "选择参考 MIDI", str(self.project_dir or DEFAULT_PROJECT_DIR),
             "MIDI 文件 (*.mid *.midi)",
         )
-        if path:
-            self.add_reference_midi(path)
+        self.add_reference_midis(paths)
 
     def set_reference_midi_path(self, value: str | Path):
         """Legacy single-MIDI setter: replace the first assignment or add one."""
         if self.project.naturalization.assignments:
             self.replace_reference_midi(0, value)
         else:
+            self.add_reference_midi(value)
+
+    def add_reference_midis(self, values):
+        """Add every valid dropped/selected MIDI as an independent assignment."""
+        if isinstance(values, (str, Path)):
+            values = [values]
+        for value in values:
             self.add_reference_midi(value)
 
     def add_reference_midi(self, value: str | Path):
@@ -196,6 +196,8 @@ class WindowStateMixin:
             assignments[0].track_ids = [
                 track.track_id for track in self.project.tracks if track.enabled
             ]
+        if any(assignment.midi_path == stored_path for assignment in assignments):
+            return
         assignments.append(MidiAssignment(stored_path, []))
         self.changed()
         self._status.showMessage(f"已添加 MIDI：{selected.name}", 8000)

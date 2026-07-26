@@ -102,6 +102,30 @@ QPushButton#primary:disabled {
     background: #8c959f;
 }
 
+/* --- AI send button --- */
+QPushButton#aiSend {
+    background: #0969da;
+    color: #000000;
+    border: none;
+    border-radius: 6px;
+    padding: 0 16px;
+    height: 36px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton#aiSend:hover {
+    background: #0550ae;
+    color: #000000;
+}
+QPushButton#aiSend:pressed {
+    background: #033d8b;
+    color: #000000;
+}
+QPushButton#aiSend:disabled {
+    background: #8c959f;
+    color: #000000;
+}
+
 /* --- Secondary Button --- */
 QPushButton#secondary {
     background: #ffffff;
