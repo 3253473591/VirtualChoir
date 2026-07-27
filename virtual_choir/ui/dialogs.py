@@ -17,6 +17,7 @@ from ..errors import ChoirError
 from ..models import MidiAssignment, NaturalizationConfig, ProjectConfig
 from ..project_io import MEDIA_DIR, copy_to_media
 from .theme import Colors, DEFAULT_PROJECT_DIR, Fonts, Spacing
+from .dialog_utils import scrollable_dialog_layout
 from .workers import AIChatWorker
 
 
@@ -28,9 +29,7 @@ class AISettingsDialog(QDialog):
         self.setMinimumSize(420, 380)
         self.resize(520, 440)
 
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(24, 24, 24, 24)
-        main_layout.setSpacing(16)
+        main_layout = scrollable_dialog_layout(self, margins=(24, 24, 24, 24), spacing=16)
 
         # Info banner
         info = QLabel("🔑 API 密钥仅保存在当前会话或 Windows 凭据管理器，不会写入工程 JSON。")
@@ -226,8 +225,7 @@ class AISuggestionDialog(QDialog):
         self.setWindowTitle("选择 AI 方案")
         self.setMinimumWidth(460)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout = scrollable_dialog_layout(self)
         layout.addWidget(QLabel("AI 返回了多套方案。选择一套后才会修改工程；应用后可从 AI 菜单撤销。"))
 
         self.selector = QComboBox()
@@ -276,8 +274,7 @@ class NaturalizationDialog(QDialog):
         self._assignments = deepcopy(config.assignments)
         self.setWindowTitle("随机偏移设置")
         self.setMinimumWidth(560)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout = scrollable_dialog_layout(self)
 
         self.enabled = QCheckBox("启用随机偏移")
         self.enabled.setChecked(config.enabled)
@@ -368,8 +365,7 @@ class MidiAssignmentDialog(QDialog):
         self.project = project
         self.setWindowTitle(f"为 {midi_name} 分配轨道")
         self.setMinimumWidth(440)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout = scrollable_dialog_layout(self)
         layout.addWidget(QLabel("请选择此 MIDI 负责哪些启用轨道。已归属其他 MIDI 的轨道会自动移入这里。"))
 
         midi_track_form = QFormLayout()
@@ -463,8 +459,7 @@ class AIConversationDialog(QDialog):
         self.worker: AIChatWorker | None = None
         self.setWindowTitle("AI 定制方案对话")
         self.setMinimumSize(620, 500)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout = scrollable_dialog_layout(self)
         self.transcript = QPlainTextEdit()
         self.transcript.setReadOnly(True)
         layout.addWidget(self.transcript, 1)
@@ -565,8 +560,7 @@ class DuplicateTrackDialog(QDialog):
         self.setWindowTitle("生成差异化副本")
         self.setMinimumWidth(480)
 
-        layout = QVBoxLayout(self)
-        layout.setSpacing(Spacing.MD)
+        layout = scrollable_dialog_layout(self, spacing=Spacing.MD)
 
         # ── Source info ──
         info_group = QGroupBox("源音频")

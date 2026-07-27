@@ -71,6 +71,9 @@ class MainWindow(
 
         self.save_action = QAction("保存工程", self, shortcut="Ctrl+S", triggered=self.save)
 
+        self.export_preset_action = QAction("预设导出…", self, triggered=self.export_preset)
+        self.import_preset_action = QAction("预设导入…", self, triggered=self.import_preset)
+
         self.save_as_action = QAction("另存为…", self, triggered=self.save_as)
 
         self.settings_action = QAction("AI 设置…", self, triggered=self.ai_settings)
@@ -129,8 +132,10 @@ class MainWindow(
     def _build_menubar(self):
         file_menu = self.menuBar().addMenu("文件")
         file_menu.addActions([
-            self.import_action, self.open_action, self.save_action, self.save_as_action
+            self.import_action, self.open_action, self.save_action, self.save_as_action,
         ])
+        file_menu.addSeparator()
+        file_menu.addActions([self.export_preset_action, self.import_preset_action])
         file_menu.addSeparator()
         file_menu.addAction("退出", self.close)
 
@@ -153,7 +158,8 @@ class MainWindow(
         toolbar.setFloatable(False)
         toolbar.setIconSize(toolbar.iconSize())
         toolbar.addActions([
-            self.import_action, self.open_action, self.save_action
+            self.import_action, self.open_action, self.save_action,
+            self.export_preset_action, self.import_preset_action,
         ])
         toolbar.addSeparator()
         toolbar.addActions([self.settings_action, self.analyze_action, self.customize_ai_action, self.clear_preview_cache_action])

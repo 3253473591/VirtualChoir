@@ -262,6 +262,13 @@ class NaturalizationConfig:
             raise ChoirError("PROJECT_SCHEMA_ERROR", "naturalization.assignments 必须为 MIDI 分配列表")
         for assignment in self.assignments:
             assignment.validate()
+        assigned_track_ids = [
+            track_id
+            for assignment in self.assignments
+            for track_id in assignment.track_ids
+        ]
+        if len(set(assigned_track_ids)) != len(assigned_track_ids):
+            raise ChoirError("PROJECT_SCHEMA_ERROR", "同一轨道不能分配给多个 MIDI")
         if type(self.random_seed) is not int or not -(2**63) <= self.random_seed < 2**63:
             raise ChoirError("PROJECT_SCHEMA_ERROR", "naturalization.random_seed 无效")
         if self.enabled:

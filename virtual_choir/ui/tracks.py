@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 
 from ..models import ProjectConfig, TrackConfig
 from .theme import Colors, Fonts
+from .dialog_utils import scrollable_dialog_layout
 from .widgets import ParameterSpinBox
 
 
@@ -709,9 +710,7 @@ class BatchTrackDialog(QDialog):
         self.setWindowTitle("批量处理轨道")
         self.setMinimumSize(380, 360)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        layout = scrollable_dialog_layout(self, spacing=12)
 
         hint = QLabel("勾选需要处理的轨道，再选择操作。移除只删除工程中的引用，不会删除音频文件。")
         hint.setWordWrap(True)

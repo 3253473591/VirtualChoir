@@ -10,3 +10,4 @@ tests/
 tools/.bigvgan_v2/
 tools/vendor/
 .vscode/
+Presets/

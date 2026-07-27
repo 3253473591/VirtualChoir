@@ -14,12 +14,55 @@ from ..models import midi_assignment_for_track
 from ..project_io import (
     MEDIA_DIR, copy_to_media, load_project, rename_media_source, save_ai_json, save_project,
 )
+from ..presets import apply_preset, load_preset, save_preset
 from .dialogs import DuplicateTrackDialog
 from .theme import DEFAULT_PROJECT_DIR
 from .tracks import BatchTrackDialog
 from .workers import DuplicateWorker
 
+PRESET_DIR = Path.cwd() / "Presets"
+
 class ProjectWorkflowMixin:
+    def export_preset(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出工程预设",
+            str(PRESET_DIR / "virtual_choir_preset.json"),
+            "虚拟合唱预设 (*.virtual-choir-preset.json *.json)",
+        )
+        if not path:
+            return
+        target = Path(path)
+        if not target.suffix:
+            target = target.with_suffix(".virtual-choir-preset.json")
+        try:
+            save_preset(self.project, target)
+        except ChoirError as exc:
+            self.error(exc)
+            return
+        self._status.showMessage(f"已导出预设：{target.name}", 8000)
+        self._toast.show_message("预设已导出", "success")
+
+    def import_preset(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入工程预设",
+            str(PRESET_DIR),
+            "虚拟合唱预设 (*.virtual-choir-preset.json *.json)",
+        )
+        if not path:
+            return
+        try:
+            preset = load_preset(Path(path))
+            apply_preset(self.project, preset)
+        except ChoirError as exc:
+            self.error(exc)
+            return
+        self.changed(room=True, tracks=True, selection=True)
+        self.room_view.fit_room()
+        self._status.showMessage("预设已导入", 8000)
+        self._toast.show_message("预设已导入", "success")
+
     def rename_track_source(self, track_id: str):
         if not self.project_dir:
             QMessageBox.information(self, "请先保存工程", "保存工程后才能重命名 Media 文件。")
@@ -343,6 +386,8 @@ class ProjectWorkflowMixin:
         self.import_action.setEnabled(enabled)
         self.open_action.setEnabled(enabled)
         self.save_action.setEnabled(enabled)
+        self.export_preset_action.setEnabled(enabled)
+        self.import_preset_action.setEnabled(enabled)
         self.analyze_action.setEnabled(enabled)
         self.customize_ai_action.setEnabled(enabled)
         self._track_panel.setEnabled(enabled)
