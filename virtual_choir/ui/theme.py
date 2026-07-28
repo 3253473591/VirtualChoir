@@ -55,4 +55,4 @@ class Radii:
     LG = 8
 
 
-DEFAULT_PROJECT_DIR = Path(__file__).resolve().parents[2] / "project"
+DEFAULT_PROJECT_DIR = Path.cwd() / "projects"

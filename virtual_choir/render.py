@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
@@ -15,7 +17,7 @@ from .errors import ChoirError
 from .models import ProjectConfig, TrackConfig, midi_for_track, resolve_source_path
 from .naturalization import naturalize_track, resolve_midi_path
 
-RENDERER_VERSION = "0.2.0"
+RENDERER_VERSION = "0.3.0"
 Progress = Callable[[int, str], None]
 
 
@@ -26,33 +28,35 @@ class Renderer:
         self.cache_dir = cache_dir or project_dir / ".render_cache"
         self.cancel_event = threading.Event()
         self.warnings: list[str] = []
+        self._warnings_lock = threading.Lock()
 
     def cancel(self) -> None: self.cancel_event.set()
 
     def render_preview(self, output_dir: Path, progress: Progress | None = None, accept_clip_risk=False) -> Path:
         self._check_disk_space(output_dir)
-        stereo = self._mix(progress)
+        rendered_tracks = self._render_enabled_tracks(progress, progress_end=95)
+        stereo = self._mix_rendered(rendered_tracks)
         self._check_peak(stereo, accept_clip_risk)
         target = output_dir / "preview.wav"
         write_preview(target, stereo)
 
         # Keep listening stems beside the mix so the preview transport can
         # switch tracks without requiring a separate export operation.
-        tracks = [track for track in self.project.tracks if track.enabled]
-        for index, track in enumerate(tracks):
+        for index, (track, rendered) in enumerate(rendered_tracks):
             self._check_cancel()
-            write_preview(output_dir / "stems" / f"{track.track_id}.wav", self._render_track(track))
-            self._report(progress, 95 + round((index + 1) / len(tracks) * 4), f"正在生成分轨预览 {track.track_id}")
+            write_preview(output_dir / "stems" / f"{track.track_id}.wav", rendered)
+            self._report(progress, 95 + round((index + 1) / len(rendered_tracks) * 4), f"正在生成分轨预览 {track.track_id}")
         self._report(progress, 100, "预览已生成")
         return target
 
     def export_stems(self, output_dir: Path, progress: Progress | None = None, accept_clip_risk=False) -> list[Path]:
         self._check_disk_space(output_dir)
-        tracks = [t for t in self.project.tracks if t.enabled]; result: list[Path] = []
-        for index, track in enumerate(tracks):
-            self._check_cancel(); stereo = self._render_track(track); self._check_peak(stereo, accept_clip_risk)
+        rendered_tracks = self._render_enabled_tracks(progress, progress_end=90)
+        result: list[Path] = []
+        for index, (track, stereo) in enumerate(rendered_tracks):
+            self._check_cancel(); self._check_peak(stereo, accept_clip_risk)
             target = output_dir / f"{track.track_id}.wav"; write_export(target, stereo); result.append(target)
-            self._report(progress, round((index + 1) / len(tracks) * 100), f"已导出 {track.track_id}")
+            self._report(progress, 90 + round((index + 1) / len(rendered_tracks) * 10), f"已导出 {track.track_id}")
         return result
 
     def export_mix(self, output_dir: Path, progress: Progress | None = None, accept_clip_risk=False) -> Path:
@@ -62,19 +66,48 @@ class Renderer:
         return target
 
     def _mix(self, progress: Progress | None) -> np.ndarray:
-        tracks = [t for t in self.project.tracks if t.enabled]; mix: np.ndarray | None = None
-        for index, track in enumerate(tracks):
-            self._check_cancel(); rendered = self._render_track(track)
+        return self._mix_rendered(self._render_enabled_tracks(progress, progress_end=95))
+
+    def _mix_rendered(self, rendered_tracks: list[tuple[TrackConfig, np.ndarray]]) -> np.ndarray:
+        mix: np.ndarray | None = None
+        for _track, rendered in rendered_tracks:
+            self._check_cancel()
             if mix is None: mix = rendered
             else:
                 if len(rendered) > len(mix): mix = np.pad(mix, ((0, len(rendered)-len(mix)), (0, 0)))
                 mix[:len(rendered)] += rendered
-            self._report(progress, round((index + 1) / len(tracks) * 95), f"正在渲染 {track.track_id}")
         if mix is None:
             return np.empty((0, 2), dtype=np.float32)
         # This is a post-mix bus control: it affects preview/mix output only,
         # never individual stem renders or the AI analysis request.
         return mix * np.float32(10 ** (self.project.room.bus_gain_db / 20))
+
+    def _render_enabled_tracks(
+        self, progress: Progress | None, *, progress_end: int,
+    ) -> list[tuple[TrackConfig, np.ndarray]]:
+        """Render independent tracks concurrently while retaining mix order."""
+        tracks = [track for track in self.project.tracks if track.enabled]
+        if not tracks:
+            return []
+        worker_count = min(len(tracks), max(1, os.cpu_count() or 1))
+        rendered_by_id: dict[str, np.ndarray] = {}
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="choir-render") as pool:
+            futures = {pool.submit(self._render_track, track): track for track in tracks}
+            try:
+                for completed, future in enumerate(as_completed(futures), start=1):
+                    self._check_cancel()
+                    track = futures[future]
+                    rendered_by_id[track.track_id] = future.result()
+                    self._report(
+                        progress, round(completed / len(tracks) * progress_end),
+                        f"正在渲染 {track.track_id}（{completed}/{len(tracks)}，{worker_count} 线程）",
+                    )
+            except Exception:
+                self.cancel_event.set()
+                for future in futures:
+                    future.cancel()
+                raise
+        return [(track, rendered_by_id[track.track_id]) for track in tracks]
 
     def _render_track(self, track: TrackConfig) -> np.ndarray:
         key = self._cache_key(track); cached = self.cache_dir / f"{key}.npy"
@@ -100,12 +133,14 @@ class Renderer:
                 self.project_dir / ".naturalization_cache", self.cancel_event,
             )
             if offsets:
-                self.warnings.append(f"{track.track_id}：已应用 {len(offsets)} 个音符随机偏移")
+                with self._warnings_lock:
+                    self.warnings.append(f"{track.track_id}：已应用 {len(offsets)} 个音符随机偏移")
             return processed
         except ChoirError as exc:
             if exc.code == "RENDER_CANCELLED":
                 raise
-            self.warnings.append(f"{track.track_id}：{exc.message}，本次已使用原始 WAV 继续渲染。")
+            with self._warnings_lock:
+                self.warnings.append(f"{track.track_id}：{exc.message}，本次已使用原始 WAV 继续渲染。")
             return read_source_wav(source_path)
 
     def _rirs(self, track: TrackConfig) -> list[np.ndarray]:

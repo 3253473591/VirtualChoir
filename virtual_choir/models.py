@@ -339,6 +339,11 @@ class TimbreVariationConfig:
     vibrato_activation_probabilities: tuple[float, float, float, float] = (
         0.92, 0.78, 0.65, 0.50,
     )
+    # A small low-to-target onset gesture, only available with MIDI note
+    # boundaries.  Presets 1-2 disable it; presets 3-5 share this range.
+    onset_scoop_depth_cents_range: tuple[float, float] = (8.0, 20.0)
+    onset_scoop_duration_ms_range: tuple[float, float] = (35.0, 50.0)
+    onset_scoop_note_probability: float = 0.70
 
     @classmethod
     def from_preset(cls, level: int) -> "TimbreVariationConfig":
@@ -361,6 +366,11 @@ class TimbreVariationConfig:
             4: ((6.0, 17.0), (4.1, 6.6), 0.78, (0.96, 0.88, 0.78, 0.68), 0.80, (0.9, 2.4)),
             5: ((8.0, 25.0), (3.9, 7.0), 0.90, (0.99, 0.94, 0.88, 0.80), 0.95, (1.2, 3.2)),
         }[level]
+        onset_scoop = (
+            ((0.0, 0.0), (0.0, 0.0), 0.0)
+            if level < 3
+            else ((8.0, 20.0), (35.0, 50.0), 0.70)
+        )
         return cls(
             preset_level=level,
             formant_shift_range=values[0],
@@ -377,6 +387,9 @@ class TimbreVariationConfig:
             vibrato_activation_probabilities=vibrato[3],
             pitch_redraw_mix=vibrato[4],
             jitter_cents_range=vibrato[5],
+            onset_scoop_depth_cents_range=onset_scoop[0],
+            onset_scoop_duration_ms_range=onset_scoop[1],
+            onset_scoop_note_probability=onset_scoop[2],
         )
 
     def validate(self) -> None:
@@ -392,11 +405,15 @@ class TimbreVariationConfig:
             ("breath_mix_range", self.breath_mix_range),
             ("vibrato_depth_cents_range", self.vibrato_depth_cents_range),
             ("vibrato_rate_hz_range", self.vibrato_rate_hz_range),
+            ("onset_scoop_depth_cents_range", self.onset_scoop_depth_cents_range),
+            ("onset_scoop_duration_ms_range", self.onset_scoop_duration_ms_range),
         ]:
             if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)) or lo > hi:
                 raise ChoirError("PROJECT_SCHEMA_ERROR", f"TimbreVariationConfig.{name} 无效")
         if not isinstance(self.vibrato_note_probability, (int, float)) or not 0 <= self.vibrato_note_probability <= 1:
             raise ChoirError("PROJECT_SCHEMA_ERROR", "TimbreVariationConfig.vibrato_note_probability 无效")
+        if not isinstance(self.onset_scoop_note_probability, (int, float)) or not 0 <= self.onset_scoop_note_probability <= 1:
+            raise ChoirError("PROJECT_SCHEMA_ERROR", "TimbreVariationConfig.onset_scoop_note_probability 无效")
         if not isinstance(self.pitch_redraw_mix, (int, float)) or not 0 <= self.pitch_redraw_mix <= 1:
             raise ChoirError("PROJECT_SCHEMA_ERROR", "TimbreVariationConfig.pitch_redraw_mix 无效")
         if len(self.vibrato_activation_probabilities) != 4 or any(

@@ -193,6 +193,9 @@ def _sample_params(rng: np.random.Generator, config: TimbreVariationConfig) -> d
         "vibrato_rate_hz_range": list(config.vibrato_rate_hz_range),
         "vibrato_note_probability": round(float(config.vibrato_note_probability), 3),
         "vibrato_activation_probabilities": list(config.vibrato_activation_probabilities),
+        "onset_scoop_depth_cents_range": list(config.onset_scoop_depth_cents_range),
+        "onset_scoop_duration_ms_range": list(config.onset_scoop_duration_ms_range),
+        "onset_scoop_note_probability": round(float(config.onset_scoop_note_probability), 3),
     }
 
 
@@ -341,6 +344,9 @@ def _build_midi_pitch_transform_cents(
             original_offset, voiced, params, rng,
             duration_s=max(0.0, unit.end_s - unit.start_s),
         )
+        onset_scoop, scoop_decision = _build_onset_scoop_cents(
+            voiced, params, rng,
+        )
         jitter = _build_jitter_line(right - left, jitter_amplitude, rng)
         # This is the same additive, source-F0-relative redraw model used by
         # the standalone listening experiment.  The preset percentage controls
@@ -348,7 +354,10 @@ def _build_midi_pitch_transform_cents(
         target_delta = redraw_mix * (redraw_offset + vibrato + jitter)
         target_delta *= _voiced_boundary_envelope(voiced)
         note_result = result[left:right]
-        note_result[voiced] += target_delta[voiced]
+        # The scoop is intentionally added after the normal boundary envelope.
+        # It needs to start below the local CREPE target at the first voiced
+        # frame instead of being faded in from zero like generic F0 edits.
+        note_result[voiced] += target_delta[voiced] + onset_scoop[voiced]
         result[left:right] = note_result
         decision.update({
             "midi_pitch": int(unit.pitch),
@@ -356,6 +365,7 @@ def _build_midi_pitch_transform_cents(
             "redraw_mix": round(redraw_mix, 3),
             "start_s": round(float(unit.start_s), 4),
             "end_s": round(float(unit.end_s), 4),
+            "onset_scoop": scoop_decision,
         })
         decisions.append(decision)
 
@@ -364,6 +374,61 @@ def _build_midi_pitch_transform_cents(
     params["pitch_redraw_decisions"] = decisions
     params["midi_pitch_role"] = "note_boundaries_only"
     return result
+
+
+def _build_onset_scoop_cents(
+    voiced: np.ndarray,
+    params: dict,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, dict]:
+    """Create a brief low-to-target physiological onset gesture.
+
+    The gesture is anchored at the first actual CREPE-voiced frame, not the
+    MIDI event time.  This keeps consonants and unvoiced attacks out of the F0
+    edit while using MIDI only for the per-note window.
+    """
+    curve = np.zeros(len(voiced), dtype=np.float64)
+    probability = float(params.get("onset_scoop_note_probability", 0.0))
+    depth_range = params.get("onset_scoop_depth_cents_range", (0.0, 0.0))
+    duration_range = params.get("onset_scoop_duration_ms_range", (0.0, 0.0))
+    depth_low, depth_high = (abs(float(value)) for value in depth_range)
+    duration_low, duration_high = (float(value) for value in duration_range)
+    decision = {
+        "enabled": False,
+        "probability": round(probability, 3),
+    }
+    if probability <= 0.0 or depth_high <= 0.0 or duration_high <= 0.0:
+        decision["mode"] = "preset_disabled"
+        return curve, decision
+    if rng.random() >= probability:
+        decision["mode"] = "not_selected"
+        return curve, decision
+
+    depth = float(rng.uniform(min(depth_low, depth_high), max(depth_low, depth_high)))
+    duration_ms = float(rng.uniform(min(duration_low, duration_high), max(duration_low, duration_high)))
+
+    starts = np.flatnonzero(voiced)
+    if not len(starts):
+        decision["mode"] = "unvoiced_note"
+        return curve, decision
+    start = int(starts[0])
+    unvoiced_after_start = np.flatnonzero(~voiced[start:])
+    voiced_stop = start + int(unvoiced_after_start[0]) if len(unvoiced_after_start) else len(voiced)
+    requested_frames = max(2, int(round(duration_ms / _F0_FRAME_PERIOD_MS)) + 1)
+    stop = min(voiced_stop, start + requested_frames)
+    if stop - start < 2:
+        decision["mode"] = "voiced_onset_too_short"
+        return curve, decision
+
+    # Start below the note's CREPE-relative target and arrive exactly at it.
+    curve[start:stop] = np.linspace(-depth, 0.0, stop - start, dtype=np.float64)
+    decision.update({
+        "enabled": True,
+        "mode": "low_to_target",
+        "depth_cents": round(depth, 3),
+        "duration_ms": round((stop - start - 1) * _F0_FRAME_PERIOD_MS, 3),
+    })
+    return curve, decision
 
 
 def _voiced_boundary_envelope(voiced: np.ndarray) -> np.ndarray:

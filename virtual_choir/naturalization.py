@@ -17,9 +17,18 @@ from .cuda_acceleration import create_linear_sampler
 from .errors import ChoirError
 from .models import NaturalizationConfig, midi_assignment_for_track
 
-NATURALIZATION_VERSION = "1.2.0"
+NATURALIZATION_VERSION = "1.4.0"
 OFFSET_STDDEV_MS = 3.0
-OFFSET_LIMIT_MS = 10.0
+OFFSET_LIMIT_MS = 15.0
+TAIL_GAP_THRESHOLD_S = 0.020
+TAIL_LEFT_MEAN_MS = -12.0
+TAIL_LEFT_STDDEV_MS = 20.0
+TAIL_LEFT_RANGE_MS = (-30.0, 0.0)
+TAIL_RIGHT_MEAN_MS = 30.0
+TAIL_RIGHT_STDDEV_MS = 18.0
+TAIL_RIGHT_RANGE_MS = (0.0, 80.0)
+# A larger right-hand component makes the two-sided distribution right-skewed.
+TAIL_RIGHT_PROBABILITY = 0.65
 _INTERPOLATION_CHUNK_SAMPLES = 262_144
 _CUDA_INTERPOLATION_THRESHOLD_SAMPLES = 1_000_000
 Progress = Callable[[int, str], None]
@@ -46,6 +55,7 @@ class UnitOffset:
     lyric: str | None
     lyric_time_s: float | None
     offset_ms: float
+    end_offset_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -219,7 +229,10 @@ def naturalize_track(
     units = parse_lyric_midi(
         midi_path, config, len(source) / 48000, assignment.midi_track_index,
     )
-    offsets = _choose_offsets(units, track_id, config.random_seed)
+    offsets = _choose_offsets(
+        units, track_id, config.random_seed,
+        audio_duration_s=len(source) / 48000,
+    )
     processed = apply_local_time_shifts(source, offsets, 48000, cancel_event)
     cache_dir.mkdir(parents=True, exist_ok=True)
     _check_cancel(cancel_event)
@@ -233,10 +246,27 @@ def naturalize_track(
         "version": NATURALIZATION_VERSION,
         "track_id": track_id,
         "distribution": {
-            "type": "truncated_normal",
-            "mean_ms": 0.0,
-            "stddev_ms": OFFSET_STDDEV_MS,
-            "limit_ms": OFFSET_LIMIT_MS,
+            "onset": {
+                "type": "truncated_normal",
+                "mean_ms": 0.0,
+                "stddev_ms": OFFSET_STDDEV_MS,
+                "range_ms": [-OFFSET_LIMIT_MS, OFFSET_LIMIT_MS],
+            },
+            "tail": {
+                "type": "right_skewed_two_sided_truncated_normal",
+                "minimum_gap_ms": TAIL_GAP_THRESHOLD_S * 1000,
+                "left": {
+                    "mean_ms": TAIL_LEFT_MEAN_MS,
+                    "stddev_ms": TAIL_LEFT_STDDEV_MS,
+                    "range_ms": list(TAIL_LEFT_RANGE_MS),
+                },
+                "right": {
+                    "mean_ms": TAIL_RIGHT_MEAN_MS,
+                    "stddev_ms": TAIL_RIGHT_STDDEV_MS,
+                    "range_ms": list(TAIL_RIGHT_RANGE_MS),
+                    "probability": TAIL_RIGHT_PROBABILITY,
+                },
+            },
         },
         "offsets": [asdict(item) for item in offsets],
     })
@@ -270,9 +300,7 @@ def apply_local_time_shifts(
         _check_cancel(cancel_event)
         start = int(round(starts[index]))
         previous_start = starts[index - 1] if index else max(0.0, starts[index] - sample_rate * 0.05)
-        next_start = starts[index + 1] if index + 1 < len(starts) else min(
-            float(length - 1), max(record.note_end_s * sample_rate, starts[index] + sample_rate * 0.05),
-        )
+        next_start = starts[index + 1] if index + 1 < len(starts) else float(length)
         left = max(0, int(round((previous_start + starts[index]) / 2))) if index else int(round(previous_start))
         right = min(length, int(round((starts[index] + next_start) / 2))) if index + 1 < len(starts) else min(length, int(round(next_start)))
         if right - left >= 3:
@@ -283,17 +311,25 @@ def apply_local_time_shifts(
             continue
 
         shift = record.offset_ms * sample_rate / 1000.0
+        tail_shift = record.end_offset_ms * sample_rate / 1000.0
         # Consonants carry the sharpest onset transients.  Keep their first
         # 20 ms untouched, then ease the timing offset into the vowel body.
         attack_end = min(right - 2, center + int(round(0.020 * sample_rate)))
         if attack_end <= center or right - attack_end < 3:
             continue
         output_positions = np.arange(left, right, dtype=np.float64)
-        mapped = np.interp(
-            output_positions,
-            np.array([left, attack_end, right - 1], dtype=np.float64),
-            np.array([left, attack_end - shift, right - 1], dtype=np.float64),
-        )
+        note_end = max(attack_end + 1, min(right - 2, int(round(record.note_end_s * sample_rate))))
+        # Map the source note end to its randomized output time.  The local
+        # region is bounded by neighbouring note starts, so a very long tail is
+        # safely limited before it can overwrite the following consonant.
+        tail_output = max(attack_end + 1, min(right - 2, note_end + tail_shift))
+        if tail_output > attack_end + 1:
+            map_output = np.array([left, attack_end, tail_output, right - 1], dtype=np.float64)
+            map_input = np.array([left, attack_end - shift, note_end, right - 1], dtype=np.float64)
+        else:
+            map_output = np.array([left, attack_end, right - 1], dtype=np.float64)
+            map_input = np.array([left, attack_end - shift, right - 1], dtype=np.float64)
+        mapped = np.interp(output_positions, map_output, map_input)
         np.clip(mapped, 0, length - 1, out=mapped)
         warped = np.empty(right - left, dtype=np.float32)
         for chunk_start in range(0, len(mapped), _INTERPOLATION_CHUNK_SAMPLES):
@@ -310,7 +346,7 @@ def apply_local_time_shifts(
 
         blend = np.zeros(right - left, dtype=np.float32)
         local_attack_end = attack_end - left
-        fade_samples = min(int(round(0.012 * sample_rate)), max(1, (right - attack_end) // 3))
+        fade_samples = min(int(round(0.050 * sample_rate)), max(1, (right - attack_end) // 3))
         fade_end = min(len(blend), local_attack_end + fade_samples)
         blend[local_attack_end:fade_end] = np.sin(
             np.linspace(0.0, np.pi / 2, fade_end - local_attack_end, endpoint=False, dtype=np.float32)
@@ -327,19 +363,47 @@ def apply_local_time_shifts(
 
 def _choose_offsets(
     units: list[LyricUnit], track_id: str, random_seed: int,
+    *, audio_duration_s: float | None = None,
 ) -> list[UnitOffset]:
     stable_track_seed = int.from_bytes(hashlib.sha256(track_id.encode("utf-8")).digest()[:8], "big")
     rng = np.random.default_rng((random_seed ^ stable_track_seed) & ((1 << 64) - 1))
     records = []
-    for unit in units:
+    for index, unit in enumerate(units):
         value = float(rng.normal(0.0, OFFSET_STDDEV_MS))
         while not -OFFSET_LIMIT_MS <= value <= OFFSET_LIMIT_MS:
             value = float(rng.normal(0.0, OFFSET_STDDEV_MS))
+        next_unit = units[index + 1] if index + 1 < len(units) else None
+        end_offset = 0.0
+        # MIDI tick conversion can turn an exact 20 ms gap into
+        # 0.020000000000000018, so retain the strict rule with a tiny tolerance.
+        available_tail_s = (
+            next_unit.start_s - unit.end_s
+            if next_unit is not None
+            else (audio_duration_s - unit.end_s if audio_duration_s is not None else float("inf"))
+        )
+        if available_tail_s > TAIL_GAP_THRESHOLD_S + 1e-9:
+            end_offset = _choose_tail_offset(rng)
         records.append(UnitOffset(
             unit.index, unit.pitch, unit.start_s, unit.end_s,
-            unit.lyric, unit.lyric_time_s, round(value, 3),
+            unit.lyric, unit.lyric_time_s, round(value, 3), round(end_offset, 3),
         ))
     return records
+
+
+def _choose_tail_offset(rng: np.random.Generator) -> float:
+    """Sample the requested two-sided, right-skewed tail-time distribution."""
+    if float(rng.random()) < TAIL_RIGHT_PROBABILITY:
+        mean, stddev, bounds = (
+            TAIL_RIGHT_MEAN_MS, TAIL_RIGHT_STDDEV_MS, TAIL_RIGHT_RANGE_MS,
+        )
+    else:
+        mean, stddev, bounds = (
+            TAIL_LEFT_MEAN_MS, TAIL_LEFT_STDDEV_MS, TAIL_LEFT_RANGE_MS,
+        )
+    value = float(rng.normal(mean, stddev))
+    while not bounds[0] <= value <= bounds[1]:
+        value = float(rng.normal(mean, stddev))
+    return value
 
 
 def _read_midi_tracks(payload: bytes) -> tuple[int, list[bytes]]:

@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 from scipy import signal
 
+from .bootstrap import vocoder_paths
 from .errors import ChoirError
 
 
@@ -24,11 +25,8 @@ MODEL_FFT_SAMPLES = 2048
 MODEL_MEL_BINS = 128
 
 _ROOT = Path(__file__).resolve().parents[1]
-_CHECKPOINT = (
-    _ROOT / "tools" / "vendor" / "SingingVocoders" / "checkpoints"
-    / "pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.ckpt"
-)
-_MODEL_SOURCE = _ROOT / "tools" / "vendor" / "SingingVocoders" / "models" / "nsf_HiFigan" / "models.py"
+_LEGACY_MODEL_SOURCE = _ROOT / "tools" / "vendor" / "SingingVocoders" / "models" / "nsf_HiFigan" / "models.py"
+_LEGACY_CHECKPOINT = _ROOT / "tools" / "vendor" / "SingingVocoders" / "checkpoints" / "pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.ckpt"
 _VOCODER_LOCK = threading.Lock()
 _VOCODER: _PcNsfHifiGan | None = None
 
@@ -103,10 +101,16 @@ def _load() -> _PcNsfHifiGan:
     global _VOCODER
     if _VOCODER is not None:
         return _VOCODER
-    if not _CHECKPOINT.is_file() or not _MODEL_SOURCE.is_file():
+    model_source, checkpoint = vocoder_paths()
+    # Keep older manually provisioned installations working.
+    if not model_source.is_file() and _LEGACY_MODEL_SOURCE.is_file():
+        model_source = _LEGACY_MODEL_SOURCE
+    if not checkpoint.is_file() and _LEGACY_CHECKPOINT.is_file():
+        checkpoint = _LEGACY_CHECKPOINT
+    if not checkpoint.is_file() or not model_source.is_file():
         raise ChoirError(
             "RENDER_DEPENDENCY_MISSING",
-            "缺少 OpenVPI PC-NSF-HiFiGAN 权重；请放置 tools/vendor/SingingVocoders。",
+            "缺少 OpenVPI PC-NSF-HiFiGAN 权重；请重新启动以完成工作目录 models/SingingVocoders 的初始化。",
         )
     with _VOCODER_LOCK:
         if _VOCODER is not None:
@@ -114,7 +118,7 @@ def _load() -> _PcNsfHifiGan:
         try:
             import torch
 
-            spec = importlib.util.spec_from_file_location("virtual_choir_openvpi_nsf_hifigan", _MODEL_SOURCE)
+            spec = importlib.util.spec_from_file_location("virtual_choir_openvpi_nsf_hifigan", model_source)
             if spec is None or spec.loader is None:
                 raise RuntimeError("无法加载 OpenVPI 模型源码")
             module = importlib.util.module_from_spec(spec)
@@ -132,10 +136,10 @@ def _load() -> _PcNsfHifiGan:
                 "num_mels": MODEL_MEL_BINS,
             })
             generator = module.Generator(config)
-            checkpoint = torch.load(_CHECKPOINT, map_location="cpu", weights_only=False)
+            checkpoint_data = torch.load(checkpoint, map_location="cpu", weights_only=False)
             state_dict = {
                 key.removeprefix("generator."): value
-                for key, value in checkpoint["state_dict"].items()
+                for key, value in checkpoint_data["state_dict"].items()
                 if key.startswith("generator.")
             }
             missing, unexpected = generator.load_state_dict(state_dict, strict=False)

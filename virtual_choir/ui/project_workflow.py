@@ -20,7 +20,7 @@ from .theme import DEFAULT_PROJECT_DIR
 from .tracks import BatchTrackDialog
 from .workers import DuplicateWorker
 
-PRESET_DIR = Path.cwd() / "Presets"
+PRESET_DIR = Path.cwd() / "presets"
 
 class ProjectWorkflowMixin:
     def export_preset(self):

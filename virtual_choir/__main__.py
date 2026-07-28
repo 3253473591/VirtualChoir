@@ -5,8 +5,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QFile, QTextStream, Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
+from .bootstrap import WorkspaceInitializationError, initialize_workspace
 from .gui import MainWindow
 
 
@@ -27,6 +28,13 @@ def main() -> int:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
+    try:
+        initialize_workspace()
+    except WorkspaceInitializationError as exc:
+        # The application is still usable for mixing existing tracks.  Keep the
+        # failure visible instead of silently deferring it until a duplicate is
+        # generated with the vocoder.
+        QMessageBox.warning(None, "模型初始化未完成", str(exc))
     # Give Qt a concrete point size before applying QSS.  This avoids Qt trying
     # to derive a point size from a pixel-sized graphics font (-1).
     app.setFont(QFont("Microsoft YaHei UI", 10))
