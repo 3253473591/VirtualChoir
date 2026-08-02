@@ -54,21 +54,5 @@ python tools\timbre_variation_comparison.py singer.wav --midi singer.mid --voice
 
 ---
 
-## 常见问题
-
-**Q：AI 分析没有返回结果？**
-
-A：请检查：① API 密钥是否正确配置；② 网络是否可正常访问 AI 服务；③ 音频是否包含足够长的有声段落（AI 仅分析最长 10 秒的纯有声片段，静音过长的文件可能无有效输出）。
-
-**Q：工程中的人声位置数据存在哪里？**
-
-A：所有歌手坐标、房间参数、麦克风配置等保存在工程的 `project_config.json` 中。API 密钥存储在 Windows 凭据管理器（Credential Manager）中，**不会**写入工程文件，便于工程分享。
-
-**Q：如何清除渲染缓存强制重新渲染？**
-
-A：删除工程目录下的 `.render_cache/` 文件夹，下次渲染时将全部重新处理。
-
----
-
 技术栈：Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN（神经声码器，用于音色差异化重合成） · torchcrepe · pypinyin · soundfile · sounddevice
 *本项目仅供学习和研究使用。使用他人录音作品进行混音时请确保拥有相关授权。*
