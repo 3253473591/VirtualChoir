@@ -22,12 +22,12 @@ python -m virtual_choir
 
 | Feature | Description |
 |---------|-------------|
-| **3D Positioning** | Drag singers on a top-down room map; supports X / Y / Z coordinates and per-track gain |
-| **Room Acoustics** | Configurable room dimensions (L×W×H), RT60 reverb time, and reverb gain |
-| **Microphone Array** | 2–6 virtual microphones with adjustable spacing and height to model different pickup patterns |
-| **AI Spatial Recommendations** | Connects to Google Gemini Native API or any OpenAI-compatible endpoint; analyzes audio content to suggest singer layouts |
-| **Randomized Timing Offsets** | Import MIDI files to apply random onset jitter (±5 ms), simulating the natural timing imperfections of a human choir |
-| **Timbre Variation** | Automatically applies vocal differentiation (formant shift, pitch detune, EQ curves, vibrato, breath mix) when duplicating tracks |
+| 3D Positioning | Drag singers on a top-down room map; supports X / Y / Z coordinates and per-track gain |
+| Room Acoustics | Configurable room dimensions (L×W×H), RT60 reverb time, and reverb gain |
+| Microphone Array | 2–6 virtual microphones with adjustable spacing and height to model different pickup patterns |
+| AI Spatial Recommendations | Connects to Google Gemini Native API or any OpenAI-compatible endpoint; analyzes audio content to suggest singer layouts |
+| Randomized Timing Offsets | Import MIDI files to apply random onset/offset jitter, simulating the natural timing imperfections of a human choir |
+| Timbre Variation | Automatically applies vocal differentiation (formant shift, pitch detune, EQ curves, vibrato, breath mix) via OpenVPI PC-NSF-HiFiGAN neural vocoder when duplicating tracks |
 
 ---
 
@@ -47,6 +47,6 @@ A: Delete the `.render_cache/` folder inside the project directory. The next ren
 
 ---
 
-Tech stack: Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN · torchcrepe · soundfile · sounddevice
+Tech stack: Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN (neural vocoder for timbre variation re-synthesis) · torchcrepe · soundfile · sounddevice
 
 *This project is for learning and research purposes only. Please ensure you have the appropriate rights before mixing third-party recordings.*

@@ -22,12 +22,12 @@ python -m virtual_choir
 
 | 功能 | 说明 |
 |------|------|
-| **三维定位** | 在 2D 俯视房间图中拖拽放置歌手，支持 X / Y / Z 坐标及独立增益 |
-| **房间声学模拟** | 自定义房间长宽高、RT60 混响时间、混响增益 |
-| **麦克风阵列** | 2–6 支麦克风，可调节间距与高度，模拟不同拾音方式 |
-| **AI 空间推荐** | 对接 Google Gemini Native API 或 OpenAI 兼容接口，根据音频内容推荐歌手布局 |
-| **随机偏移** | 导入 MIDI 文件，对歌声施加随机起音偏移（±5 ms），模拟真人合唱的非完美同步 |
-| **音色差异化** | 复制轨道时自动施加音色变化（共振峰偏移、音高微调、EQ 曲线、颤音、气息混合） |
+| 三维定位 | 在 2D 俯视房间图中拖拽放置歌手，支持 X / Y / Z 坐标及独立增益 |
+| 房间声学模拟 | 自定义房间长宽高、RT60 混响时间、混响增益 |
+| 麦克风阵列 | 2–6 支麦克风，可调节间距与高度，模拟不同拾音方式 |
+| AI 空间推荐 | 对接 Google Gemini Native API 或 OpenAI 兼容接口，根据音频内容推荐歌手布局 |
+| 随机偏移 | 导入 MIDI 文件，对歌声施加随机起音/尾音偏移，模拟真人合唱的非完美同步 |
+| 音色差异化 | 复制轨道时通过 OpenVPI PC-NSF-HiFiGAN 神经声码器自动施加音色变化（共振峰偏移、音高微调、EQ 曲线、颤音、气息混合） |
 
 ---
 
@@ -47,5 +47,5 @@ A：删除工程目录下的 `.render_cache/` 文件夹，下次渲染时将全�
 
 ---
 
-技术栈：Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN · torchcrepe · soundfile · sounddevice
+技术栈：Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN（神经声码器，用于音色差异化重合成） · torchcrepe · soundfile · sounddevice
 *本项目仅供学习和研究使用。使用他人录音作品进行混音时请确保拥有相关授权。*
