@@ -54,22 +54,6 @@ The tool writes a `manifest.json` containing the source audio, preset levels, vo
 
 ---
 
-## FAQ
-
-**Q: AI analysis returns no results?**
-
-A: Check: ① that your API key is correctly configured; ② that the network can reach your AI provider; ③ that the audio contains sufficient voiced content (the AI only analyzes up to 10 seconds of detected voiced segments; files that are mostly silence may produce no output).
-
-**Q: Where is singer positioning data stored?**
-
-A: All singer coordinates, room parameters, and microphone settings are saved in the project's `project_config.json`. API keys are stored in the Windows Credential Manager and are **never** written to project files, so projects can be shared safely.
-
-**Q: How do I clear the render cache to force a full re-render?**
-
-A: Delete the `.render_cache/` folder inside the project directory. The next render will reprocess everything from scratch.
-
----
-
 Tech stack: Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN (neural vocoder for timbre variation re-synthesis) · torchcrepe · pypinyin · soundfile · sounddevice
 
 *This project is for learning and research purposes only. Please ensure you have the appropriate rights before mixing third-party recordings.*
