@@ -28,6 +28,29 @@ python -m virtual_choir
 | AI 空间推荐 | 对接 Google Gemini Native API 或 OpenAI 兼容接口，根据音频内容推荐歌手布局 |
 | 随机偏移 | 导入 MIDI 文件，对歌声施加随机起音/尾音偏移，模拟真人合唱的非完美同步 |
 | 音色差异化 | 复制轨道时通过 OpenVPI PC-NSF-HiFiGAN 神经声码器自动施加音色变化（共振峰偏移、音高微调、EQ 曲线、颤音、气息混合） |
+| 声音风格与咬字差异 | 复制轨道时可选择流行、美声或童声；第 3/4/5 档分别对应低、中、高咬字差异，按歌词 MIDI 检测辅音到元音的边界并进行风格化处理 |
+
+---
+
+## 音色差异化
+
+在轨道菜单中选择“生成差异化副本”，可设置副本数量、声音风格和差异化预设。声音风格只改变处理策略，不需要额外的美声或童声训练数据：
+
+| 声音风格 | 处理重点 |
+|----------|----------|
+| 流行 | 保持自然清晰的辅音，适度增强咬字轮廓 |
+| 美声 | 减少辅音尖锐度，突出元音起始和韵尾连贯性 |
+| 童声 | 增强辅音瞬态和高频清晰度，保持短促明亮的元音起始 |
+
+咬字差异使用差异化预设中的档位控制：一、二档不改变咬字，三、四、五档分别为低、中、高。处理需要当前轨道分配歌词 MIDI；程序会把 MIDI 的歌词（例如 `jia` 或汉字“家”）转换为拼音，并在 MIDI 音符时间点附近寻找实际的辅音起始。没有歌词 MIDI 时，原有的音高和音色差异化仍可正常使用，只跳过咬字处理。
+
+可使用对比工具批量生成 1/3/5 档、每档 3 份副本：
+
+```powershell
+python tools\timbre_variation_comparison.py singer.wav --midi singer.mid --voice-style child
+```
+
+该工具会生成 `manifest.json`，记录输入音频、预设档位、声音风格和输出文件。`--voice-style` 可选 `popular`、`bel_canto` 或 `child`。
 
 ---
 
@@ -47,5 +70,5 @@ A：删除工程目录下的 `.render_cache/` 文件夹，下次渲染时将全�
 
 ---
 
-技术栈：Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN（神经声码器，用于音色差异化重合成） · torchcrepe · soundfile · sounddevice
+技术栈：Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN（神经声码器，用于音色差异化重合成） · torchcrepe · pypinyin · soundfile · sounddevice
 *本项目仅供学习和研究使用。使用他人录音作品进行混音时请确保拥有相关授权。*

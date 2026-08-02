@@ -577,7 +577,16 @@ class DuplicateTrackDialog(QDialog):
         self.copy_count.setValue(3)
         self.copy_count.setToolTip("生成 1-64 份音色差异化的副本")
         self.copy_count.valueChanged.connect(self._update_preview)
+
+        self.voice_style = QComboBox()
+        self.voice_style.addItem("\u6d41\u884c", "popular")
+        self.voice_style.addItem("\u7f8e\u58f0", "bel_canto")
+        self.voice_style.addItem("\u7ae5\u58f0", "child")
+        self.voice_style.setToolTip("\u58f0\u97f3\u98ce\u683c\u51b3\u5b9a\u54ac\u5b57\u7684\u8f85\u97f3\u3001\u5143\u97f3\u548c\u97f5\u5c3e\u5904\u7406\u65b9\u5f0f")
+        self.voice_style.currentIndexChanged.connect(self._update_preview)
         count_layout.addRow("副本数量：", self.copy_count)
+
+        count_layout.addRow("\u58f0\u97f3\u98ce\u683c\uff1a", self.voice_style)
 
         self.preset = QComboBox()
         self.preset.addItem("一档 - 极轻微", 1)
@@ -589,6 +598,12 @@ class DuplicateTrackDialog(QDialog):
         self.preset.setToolTip("同一批副本共享此档位，但各自使用独立随机参数")
         self.preset.currentIndexChanged.connect(self._update_preview)
         count_layout.addRow("差异化预设：", self.preset)
+        self.articulation_label = QLabel()
+        self.articulation_label.setToolTip(
+            "仅在有歌词 MIDI 时生效：按歌词音节检测辅音到元音的边界，"
+            "再根据声音风格调整辅音、元音起始和韵尾。"
+        )
+        count_layout.addRow("咬字差异：", self.articulation_label)
         if midi_path:
             count_layout.addRow("颤音边界：", QLabel("使用工程 MIDI 的逐音符颤音"))
         else:
@@ -628,15 +643,36 @@ class DuplicateTrackDialog(QDialog):
             media = Path("<项目目录>/Media")
             stem = Path(self.source_track.file_name).stem
         preset_text = self.preset.currentText()
-        lines = [f"预设：{preset_text}", "每份副本使用独立随机参数。", f"将在 {media} 中生成以下文件："]
+        style_text = self.voice_style.currentText()
+        articulation_text = self._articulation_text()
+        self.articulation_label.setText(articulation_text)
+        lines = [
+            f"预设：{preset_text}",
+            f"咬字差异：{articulation_text}",
+            "每份副本使用独立随机参数。",
+            f"将在 {media} 中生成以下文件：",
+        ]
+        lines.insert(0, f"\u58f0\u97f3\u98ce\u683c\uff1a{style_text}")
         for i in range(1, n + 1):
             lines.append(f"  {stem}_副本{i}.wav")
         if n > 8:
             lines.append(f"  … 共 {n} 个文件")
         self.preview_label.setText("\n".join(lines))
 
+    def _articulation_text(self) -> str:
+        """Return the user-facing articulation intensity for the preset."""
+        level = int(self.preset.currentData())
+        return {
+            1: "关闭（一、二档不改变咬字）",
+            2: "关闭（一、二档不改变咬字）",
+            3: "低",
+            4: "中",
+            5: "高",
+        }[level]
+
     def result(self) -> dict:
         return {
             "copy_count": self.copy_count.value(),
             "preset_level": int(self.preset.currentData()),
+            "voice_style": str(self.voice_style.currentData()),
         }

@@ -11,9 +11,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import threading
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +39,62 @@ _F0_FRAME_PERIOD_MS = MODEL_HOP_SAMPLES * 1000.0 / 44_100
 _COPY_SUFFIX = "\u526f\u672c"
 JITTER_MIN_INTERVAL_MS = 80.0
 JITTER_MAX_INTERVAL_MS = 180.0
+
+_PINYIN_INITIALS = (
+    "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l",
+    "g", "k", "h", "j", "q", "x", "r", "z", "c", "s",
+)
+_INITIAL_CLASS = {
+    "b": "stop", "p": "stop", "d": "stop", "t": "stop", "g": "stop", "k": "stop",
+    "j": "affricate", "q": "affricate", "zh": "affricate", "ch": "affricate", "z": "affricate", "c": "affricate",
+    "f": "fricative", "h": "fricative", "x": "fricative", "sh": "fricative", "s": "fricative", "r": "fricative",
+    "m": "sonorant", "n": "sonorant", "l": "sonorant",
+}
+_MAX_CONSONANT_MS = {
+    "zero": 15.0,
+    "stop": 55.0,
+    "affricate": 80.0,
+    "fricative": 85.0,
+    "sonorant": 55.0,
+}
+_ARTICULATION_PROFILES = {
+    "popular": {
+        "consonant_gain_db": 0.7,
+        "consonant_high_db": 0.8,
+        "vowel_entry_db": 0.2,
+        "tail_gain_db": -0.2,
+        "vowel_window_ms": 70.0,
+    },
+    "bel_canto": {
+        "consonant_gain_db": -0.9,
+        "consonant_high_db": -1.0,
+        "vowel_entry_db": 0.8,
+        "tail_gain_db": 0.5,
+        "vowel_window_ms": 115.0,
+    },
+    "child": {
+        "consonant_gain_db": 1.5,
+        "consonant_high_db": 1.8,
+        "vowel_entry_db": 0.4,
+        "tail_gain_db": -0.6,
+        "vowel_window_ms": 55.0,
+    },
+}
+
+
+@dataclass(frozen=True)
+class ArticulationRegion:
+    """Detected consonant-to-vowel boundary for one lyric-bearing MIDI note."""
+
+    note_index: int
+    lyric: str
+    pinyin: str
+    initial: str
+    initial_class: str
+    final_class: str
+    consonant_start_s: float
+    vowel_start_s: float
+    note_end_s: float
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +137,11 @@ def generate_variations(
     if progress:
         progress(2, "正在分析音高与频谱…")
     analysis = _analyze_voice(source, 48000, cancel_event)
-    analysis_cache: dict[str, VocoderAnalysis] = {"vocoder": analysis}
+    analysis_cache: dict[str, object] = {"vocoder": analysis}
+    if midi_units and config.articulation_strength > 0.0:
+        analysis_cache["articulation"] = _build_articulation_regions(
+            source, 48000, analysis.f0, midi_units, cancel_event,
+        )
     jobs = []
     for idx in range(1, copy_count + 1):
         seed = _derive_seed(source_sha, idx)
@@ -132,7 +195,7 @@ def generate_variations(
 def _process_copy(
     source: np.ndarray,
     params: dict,
-    analysis_cache: dict[str, VocoderAnalysis],
+    analysis_cache: dict[str, object],
     seed: int,
     cancel_event: threading.Event | None,
     midi_units: tuple[LyricUnit, ...] | None,
@@ -177,6 +240,8 @@ def _sample_params(rng: np.random.Generator, config: TimbreVariationConfig) -> d
         return float(rng.uniform(pair[0], pair[1]))
 
     return {
+        "voice_style": config.voice_style,
+        "articulation_strength": round(float(config.articulation_strength), 3),
         "formant_shift": round(_uniform(config.formant_shift_range), 4),
         "pitch_shift_cents": round(_uniform(config.pitch_shift_cents_range), 2),
         "pitch_line_cents": round(_uniform(config.pitch_line_cents_range), 2),
@@ -210,7 +275,7 @@ def _apply_timbre_variation(
     params: dict,
     sample_rate: int,
     rng: np.random.Generator,
-    analysis_cache: dict[str, VocoderAnalysis] | None = None,
+    analysis_cache: dict[str, object] | None = None,
     cancel_event: threading.Event | None = None,
     midi_units: tuple[LyricUnit, ...] | None = None,
 ) -> np.ndarray:
@@ -228,6 +293,18 @@ def _apply_timbre_variation(
     )
     audio = _match_length(audio, len(source))
     _check_cancel(cancel_event)
+
+    regions = analysis_cache.get("articulation") if analysis_cache is not None else None
+    if params.get("articulation_strength", 0.0) > 0.0 and isinstance(regions, tuple):
+        try:
+            audio, decisions = _apply_articulation_variation(
+                audio, sample_rate, regions, params, rng, cancel_event,
+            )
+            params["articulation_decisions"] = decisions
+        except ChoirError:
+            raise
+        except Exception:
+            params["articulation_decisions"] = [{"mode": "processing_skipped"}]
 
     if abs(params["formant_shift"]) > 1e-6:
         audio = _formant_shift_eq(audio, sample_rate, params["formant_shift"])
@@ -303,6 +380,269 @@ def _match_length(audio: np.ndarray, expected_length: int) -> np.ndarray:
     if len(audio) >= expected_length:
         return audio[:expected_length]
     return np.pad(audio, (0, expected_length - len(audio)))
+
+
+def _build_articulation_regions(
+    source: np.ndarray,
+    sample_rate: int,
+    f0: np.ndarray,
+    midi_units: tuple[LyricUnit, ...],
+    cancel_event: threading.Event | None,
+) -> tuple[ArticulationRegion, ...]:
+    """Locate the consonant-to-vowel boundary around lyric-bearing notes.
+
+    MIDI timing is only an anchor.  In vocal synthesis exports, an initial
+    consonant can begin shortly before the note timestamp, so the boundary is
+    located from the source waveform's energy, spectral balance and voiced F0.
+    """
+    if not len(source) or not midi_units:
+        return ()
+    times, energy, high_ratio, flux, voiced = _articulation_features(source, sample_rate, f0)
+    if not len(times):
+        return ()
+
+    regions: list[ArticulationRegion] = []
+    previous_end = 0.0
+    for unit in midi_units:
+        _check_cancel(cancel_event)
+        pinyin = _lyric_to_pinyin(unit.lyric)
+        if pinyin is None:
+            previous_end = max(previous_end, unit.end_s)
+            continue
+        initial = _pinyin_initial(pinyin)
+        initial_class = _INITIAL_CLASS.get(initial, "zero")
+        vowel_start = _detect_vowel_start(
+            times, energy, high_ratio, flux, voiced,
+            note_start_s=unit.start_s,
+            note_end_s=unit.end_s,
+            previous_note_end_s=previous_end,
+            initial_class=initial_class,
+        )
+        maximum = _MAX_CONSONANT_MS[initial_class] / 1000.0
+        consonant_start = vowel_start if initial_class == "zero" else max(
+            previous_end, unit.start_s - maximum, vowel_start - maximum,
+        )
+        if vowel_start <= consonant_start + 0.003:
+            consonant_start = vowel_start
+        regions.append(ArticulationRegion(
+            note_index=unit.index,
+            lyric=unit.lyric or "",
+            pinyin=pinyin,
+            initial=initial,
+            initial_class=initial_class,
+            final_class=_pinyin_final_class(pinyin, initial),
+            consonant_start_s=round(float(consonant_start), 5),
+            vowel_start_s=round(float(vowel_start), 5),
+            note_end_s=round(float(unit.end_s), 5),
+        ))
+        previous_end = max(previous_end, unit.end_s)
+    return tuple(regions)
+
+
+def _articulation_features(
+    source: np.ndarray, sample_rate: int, f0: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build lightweight 5 ms features shared by every generated copy."""
+    hop = max(1, int(round(sample_rate * 0.005)))
+    frame = max(256, int(round(sample_rate * 0.025)))
+    overlap = max(0, frame - hop)
+    _freqs, times, spectrum = signal.stft(
+        source.astype(np.float64), fs=sample_rate, window="hann", nperseg=frame,
+        noverlap=overlap, boundary=None, padded=False,
+    )
+    if spectrum.ndim != 2 or not spectrum.shape[1]:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty, empty, empty, np.empty(0, dtype=bool)
+    magnitude = np.abs(spectrum)
+    power = magnitude * magnitude
+    energy = np.sqrt(np.mean(power, axis=0))
+    frequencies = np.fft.rfftfreq(frame, 1.0 / sample_rate)
+    speech_band = (frequencies >= 80.0) & (frequencies <= min(8_000.0, sample_rate / 2 - 1.0))
+    high_band = (frequencies >= 2_000.0) & (frequencies <= min(8_000.0, sample_rate / 2 - 1.0))
+    total = np.sum(power[speech_band], axis=0) + 1e-12
+    high_ratio = np.sum(power[high_band], axis=0) / total
+    flux = np.zeros(len(times), dtype=np.float64)
+    if magnitude.shape[1] > 1:
+        flux[1:] = np.sum(np.maximum(magnitude[:, 1:] - magnitude[:, :-1], 0.0), axis=0)
+        scale = float(np.percentile(flux[1:], 95)) if len(flux) > 1 else 0.0
+        if scale > 1e-12:
+            flux /= scale
+    if len(f0):
+        f0_times = np.arange(len(f0), dtype=np.float64) * _F0_FRAME_PERIOD_MS / 1000.0
+        voiced = np.interp(times, f0_times, (f0 > 0).astype(np.float64), left=0.0, right=0.0) >= 0.5
+    else:
+        voiced = np.zeros(len(times), dtype=bool)
+    return times, energy, high_ratio, flux, voiced
+
+
+def _detect_vowel_start(
+    times: np.ndarray,
+    energy: np.ndarray,
+    high_ratio: np.ndarray,
+    flux: np.ndarray,
+    voiced: np.ndarray,
+    *,
+    note_start_s: float,
+    note_end_s: float,
+    previous_note_end_s: float,
+    initial_class: str,
+) -> float:
+    maximum = _MAX_CONSONANT_MS[initial_class] / 1000.0
+    left = max(previous_note_end_s, note_start_s - maximum)
+    right = min(note_end_s, note_start_s + min(0.18, max(0.05, (note_end_s - note_start_s) * 0.55)))
+    candidates = np.flatnonzero((times >= left) & (times <= right))
+    if not len(candidates):
+        return float(min(max(note_start_s, 0.0), note_end_s))
+
+    local_energy = energy[candidates]
+    floor = float(np.percentile(local_energy, 15))
+    peak = float(np.percentile(local_energy, 90))
+    energy_threshold = floor + (peak - floor) * 0.22
+    # A vowel has periodic energy and normally less high-frequency dominance
+    # than a preceding fricative/affricate.  Require two adjacent frames to
+    # avoid reacting to one sharp consonant transient.
+    for position, frame_index in enumerate(candidates[:-1]):
+        next_index = candidates[position + 1]
+        sustained = energy[frame_index] >= energy_threshold and energy[next_index] >= energy_threshold
+        periodic = voiced[frame_index] and voiced[next_index]
+        vowelish = high_ratio[frame_index] < 0.68 or flux[frame_index] < 0.65
+        if sustained and periodic and vowelish:
+            return float(times[frame_index])
+
+    voiced_candidates = candidates[(voiced[candidates]) & (energy[candidates] >= energy_threshold)]
+    if len(voiced_candidates):
+        return float(times[voiced_candidates[0]])
+    energetic = candidates[energy[candidates] >= energy_threshold]
+    if len(energetic):
+        return float(times[energetic[0]])
+    return float(min(max(note_start_s, left), right))
+
+
+def _lyric_to_pinyin(lyric: str | None) -> str | None:
+    if not lyric:
+        return None
+    text = lyric.strip().lower()
+    ascii_tokens = re.findall(r"[a-zv\u00fc\u00fc]+[0-9]*", text)
+    if ascii_tokens:
+        return _normalise_pinyin(ascii_tokens[0])
+    try:
+        from pypinyin import Style, lazy_pinyin
+
+        syllables = lazy_pinyin(text, style=Style.NORMAL, strict=False)
+    except (ImportError, ValueError):
+        return None
+    return _normalise_pinyin(syllables[0]) if syllables else None
+
+
+def _normalise_pinyin(value: str) -> str | None:
+    decomposed = unicodedata.normalize("NFD", value.lower())
+    plain = "".join(char for char in decomposed if not unicodedata.combining(char))
+    token = re.sub(r"[^a-zv\u00fc]", "", plain).replace("\u00fc", "v")
+    return token or None
+
+
+def _pinyin_initial(pinyin: str) -> str:
+    return next((item for item in _PINYIN_INITIALS if pinyin.startswith(item)), "")
+
+
+def _pinyin_final_class(pinyin: str, initial: str) -> str:
+    final = pinyin[len(initial):]
+    if final.endswith(("ng", "n", "m")):
+        return "nasal"
+    return "vowel"
+
+
+def _apply_articulation_variation(
+    audio: np.ndarray,
+    sample_rate: int,
+    regions: tuple[ArticulationRegion, ...],
+    params: dict,
+    rng: np.random.Generator,
+    cancel_event: threading.Event | None,
+) -> tuple[np.ndarray, list[dict]]:
+    """Apply style-aware, local articulation changes without altering lyrics."""
+    strength = float(params.get("articulation_strength", 0.0))
+    profile = _ARTICULATION_PROFILES.get(str(params.get("voice_style", "popular")), _ARTICULATION_PROFILES["popular"])
+    if strength <= 0.0 or not regions:
+        return audio, []
+
+    result = audio.astype(np.float32, copy=True)
+    decisions: list[dict] = []
+    for region in regions:
+        _check_cancel(cancel_event)
+        variation = float(rng.uniform(0.75, 1.25)) * strength
+        consonant_left = int(round(region.consonant_start_s * sample_rate))
+        consonant_right = int(round(region.vowel_start_s * sample_rate))
+        consonant_gain = profile["consonant_gain_db"] * variation
+        high_gain = profile["consonant_high_db"] * variation
+        if consonant_right - consonant_left >= max(8, int(sample_rate * 0.008)):
+            _apply_local_high_shelf(result, consonant_left, consonant_right, sample_rate, high_gain)
+            _apply_local_gain(result, consonant_left, consonant_right, consonant_gain, mode="taper")
+
+        vowel_left = consonant_right
+        vowel_right = min(len(result), vowel_left + int(round(profile["vowel_window_ms"] * sample_rate / 1000.0)))
+        vowel_gain = profile["vowel_entry_db"] * variation
+        if vowel_right - vowel_left >= 8:
+            _apply_local_gain(result, vowel_left, vowel_right, vowel_gain, mode="decay")
+
+        tail_right = min(len(result), int(round(region.note_end_s * sample_rate)))
+        tail_window = int(round((70.0 if region.final_class == "nasal" else 45.0) * sample_rate / 1000.0))
+        tail_left = max(vowel_left, tail_right - tail_window)
+        tail_gain = profile["tail_gain_db"] * variation
+        if tail_right - tail_left >= 8:
+            _apply_local_gain(result, tail_left, tail_right, tail_gain, mode="rise")
+
+        decisions.append({
+            "note_index": region.note_index,
+            "lyric": region.lyric,
+            "pinyin": region.pinyin,
+            "initial": region.initial,
+            "initial_class": region.initial_class,
+            "final_class": region.final_class,
+            "consonant_start_s": region.consonant_start_s,
+            "vowel_start_s": region.vowel_start_s,
+            "consonant_gain_db": round(float(consonant_gain), 3),
+            "consonant_high_db": round(float(high_gain), 3),
+            "vowel_entry_db": round(float(vowel_gain), 3),
+            "tail_gain_db": round(float(tail_gain), 3),
+        })
+    return result, decisions
+
+
+def _apply_local_high_shelf(
+    audio: np.ndarray, left: int, right: int, sample_rate: int, gain_db: float,
+) -> None:
+    if abs(gain_db) < 0.02 or right <= left:
+        return
+    segment = audio[left:right].copy()
+    filtered = _apply_eq(segment, sample_rate, 0.0, gain_db)
+    mask = _local_mask(len(segment), mode="taper")
+    audio[left:right] = segment * (1.0 - mask) + filtered * mask
+
+
+def _apply_local_gain(
+    audio: np.ndarray, left: int, right: int, gain_db: float, *, mode: str,
+) -> None:
+    if abs(gain_db) < 0.02 or right <= left:
+        return
+    mask = _local_mask(right - left, mode=mode)
+    ratio = np.float32(10.0 ** (gain_db / 20.0))
+    audio[left:right] *= 1.0 + mask * (ratio - 1.0)
+
+
+def _local_mask(length: int, *, mode: str) -> np.ndarray:
+    if length <= 1:
+        return np.ones(length, dtype=np.float32)
+    phase = np.linspace(0.0, np.pi / 2, length, endpoint=True, dtype=np.float32)
+    if mode == "decay":
+        return np.cos(phase) ** 2
+    if mode == "rise":
+        return np.sin(phase) ** 2
+    fade = min(max(1, length // 4), int(round(0.006 * 48_000)))
+    mask = np.ones(length, dtype=np.float32)
+    mask[:fade] = np.sin(np.linspace(0.0, np.pi / 2, fade, endpoint=False, dtype=np.float32)) ** 2
+    mask[-fade:] = np.cos(np.linspace(0.0, np.pi / 2, fade, endpoint=True, dtype=np.float32)) ** 2
+    return mask
 
 
 def _build_midi_pitch_transform_cents(
@@ -645,9 +985,18 @@ def _load_vibrato_notes(
     if midi_path is None:
         return None, "voiced_segments"
     try:
-        return tuple(parse_midi_notes(
-            midi_path, audio_duration_s, midi_track_index=midi_track_index,
-        )), "midi_notes"
+        try:
+            units = parse_midi_notes(
+                midi_path, audio_duration_s, require_lyrics=True,
+                midi_track_index=midi_track_index,
+            )
+        except ChoirError:
+            # Keep all existing no-lyric MIDI workflows working.  Lyrics are
+            # optional for F0 variation, but preferred for articulation.
+            units = parse_midi_notes(
+                midi_path, audio_duration_s, midi_track_index=midi_track_index,
+            )
+        return tuple(units), "midi_notes"
     except (ChoirError, OSError, ValueError):
         return None, "voiced_segments"
 

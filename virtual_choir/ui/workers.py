@@ -124,6 +124,7 @@ class DuplicateWorker(QObject):
     def __init__(
         self, source_path: Path, copy_count: int, output_dir: Path, preset_level: int = 3,
         midi_path: Path | None = None, midi_track_index: int | None = None,
+        voice_style: str = "popular",
     ):
         super().__init__()
         self.source_path = source_path
@@ -132,6 +133,7 @@ class DuplicateWorker(QObject):
         self.preset_level = preset_level
         self.midi_path = midi_path
         self.midi_track_index = midi_track_index
+        self.voice_style = voice_style
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -144,7 +146,7 @@ class DuplicateWorker(QObject):
                 self.source_path,
                 self.copy_count,
                 self.output_dir,
-                config=TimbreVariationConfig.from_preset(self.preset_level),
+                config=TimbreVariationConfig.from_preset(self.preset_level, self.voice_style),
                 cancel_event=self._cancel,
                 progress=lambda p, m: self.progress.emit(p, m),
                 midi_path=self.midi_path,

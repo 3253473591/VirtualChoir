@@ -11,6 +11,7 @@ from .errors import ChoirError
 
 EPSILON = 1e-6
 TRACK_RE = re.compile(r"^singer_[1-9][0-9]*$")
+VOICE_STYLES = {"popular", "bel_canto", "child"}
 NATURALIZATION_LANGUAGES = {"普通话", "日语", "英语", "韩语", "粤语", "多语种混合"}
 SEGMENT_LANGUAGES = NATURALIZATION_LANGUAGES - {"多语种混合"}
 
@@ -126,6 +127,7 @@ class TrackConfig:
     parent_source: str | None = None
     copy_index: int | None = None
     variation_preset: int | None = None
+    variation_style: str | None = None
 
     def validate(self, room: RoomConfig) -> None:
         if not isinstance(self.track_id, str) or not TRACK_RE.fullmatch(self.track_id):
@@ -143,11 +145,13 @@ class TrackConfig:
             type(self.variation_preset) is not int or not 1 <= self.variation_preset <= 5
         ):
             raise ChoirError("PROJECT_SCHEMA_ERROR", "variation_preset 必须为 1-5 或 null")
+        if self.variation_style is not None and self.variation_style not in VOICE_STYLES:
+            raise ChoirError("PROJECT_SCHEMA_ERROR", "variation_style is invalid")
         validate_position(self.position, room)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], room: RoomConfig) -> "TrackConfig":
-        allowed = {"track_id", "file_name", "position", "gain_db", "enabled", "source_path", "parent_source", "copy_index", "variation_preset"}
+        allowed = {"track_id", "file_name", "position", "gain_db", "enabled", "source_path", "parent_source", "copy_index", "variation_preset", "variation_style"}
         _exact_keys(data, allowed, "track", required={"track_id", "file_name", "position", "gain_db", "enabled"})
         result = cls(**{**data, "position": Position.from_dict(data["position"])})
         result.validate(room); return result
@@ -320,6 +324,8 @@ class TimbreVariationConfig:
     """Concrete variation ranges selected from one of the five presets."""
 
     preset_level: int = 3
+    voice_style: str = "popular"
+    articulation_strength: float = 0.35
     formant_shift_range: tuple[float, float] = (-0.05, 0.05)
     pitch_shift_cents_range: tuple[float, float] = (-4.0, 4.0)
     pitch_line_cents_range: tuple[float, float] = (-3.0, 3.0)
@@ -346,8 +352,10 @@ class TimbreVariationConfig:
     onset_scoop_note_probability: float = 0.70
 
     @classmethod
-    def from_preset(cls, level: int) -> "TimbreVariationConfig":
+    def from_preset(cls, level: int, voice_style: str = "popular") -> "TimbreVariationConfig":
         """Return fixed ranges for a user-facing differentiation preset."""
+        if voice_style not in VOICE_STYLES:
+            raise ChoirError("PROJECT_SCHEMA_ERROR", "voice style is invalid")
         presets = {
             1: ((-0.015, 0.015), (-1.5, 1.5), (-3.0, 3.0), (-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5), (0.001, 0.003)),
             2: ((-0.03, 0.03), (-2.5, 2.5), (-6.0, 6.0), (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0), (0.002, 0.005)),
@@ -373,6 +381,8 @@ class TimbreVariationConfig:
         )
         return cls(
             preset_level=level,
+            voice_style=voice_style,
+            articulation_strength={1: 0.0, 2: 0.0, 3: 0.35, 4: 0.65, 5: 1.0}[level],
             formant_shift_range=values[0],
             pitch_shift_cents_range=values[1],
             pitch_line_cents_range=values[2],
@@ -393,6 +403,10 @@ class TimbreVariationConfig:
         )
 
     def validate(self) -> None:
+        if self.voice_style not in VOICE_STYLES:
+            raise ChoirError("PROJECT_SCHEMA_ERROR", "TimbreVariationConfig.voice_style is invalid")
+        if not isinstance(self.articulation_strength, (int, float)) or not 0 <= self.articulation_strength <= 1:
+            raise ChoirError("PROJECT_SCHEMA_ERROR", "TimbreVariationConfig.articulation_strength is invalid")
         for name, (lo, hi) in [
             ("formant_shift_range", self.formant_shift_range),
             ("pitch_shift_cents_range", self.pitch_shift_cents_range),
@@ -497,7 +511,7 @@ class ProjectConfig:
         tracks = []
         for track in self.tracks:
             item = asdict(track)
-            for nil_key in ("source_path", "parent_source", "copy_index", "variation_preset"):
+            for nil_key in ("source_path", "parent_source", "copy_index", "variation_preset", "variation_style"):
                 if item.get(nil_key) is None:
                     item.pop(nil_key, None)
             tracks.append(item)

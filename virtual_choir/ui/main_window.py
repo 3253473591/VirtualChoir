@@ -251,6 +251,7 @@ class MainWindow(
         self.dup_thread: QThread | None = None
         self.dup_worker: DuplicateWorker | None = None
         self._dup_source_track: TrackConfig | None = None
+        self._dup_voice_style: str | None = None
 
     def _build_left_panel(self) -> QWidget:
         """Build left parameter panel with collapsible cards."""

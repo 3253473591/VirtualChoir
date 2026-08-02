@@ -28,6 +28,29 @@ python -m virtual_choir
 | AI Spatial Recommendations | Connects to Google Gemini Native API or any OpenAI-compatible endpoint; analyzes audio content to suggest singer layouts |
 | Randomized Timing Offsets | Import MIDI files to apply random onset/offset jitter, simulating the natural timing imperfections of a human choir |
 | Timbre Variation | Automatically applies vocal differentiation (formant shift, pitch detune, EQ curves, vibrato, breath mix) via OpenVPI PC-NSF-HiFiGAN neural vocoder when duplicating tracks |
+| Voice Style and Articulation | Choose popular, bel canto, or child voice processing; presets 3/4/5 provide low, medium, and high articulation differences using lyric-aware consonant-to-vowel boundaries |
+
+---
+
+## Timbre Variation
+
+Choose “Generate differentiated copies” from a track menu to set the copy count, voice style, and variation preset. Voice styles change the processing profile and do not require additional bel canto or child voice training data:
+
+| Voice style | Processing focus |
+|-------------|------------------|
+| Popular | Keeps consonants clear while adding a moderate articulation contour |
+| Bel canto | Softens sharp consonants and emphasizes connected vowel onsets and tails |
+| Child | Enhances consonant transients and high-frequency clarity with shorter, brighter vowel entries |
+
+Articulation intensity is tied to the variation preset: presets 1 and 2 leave articulation unchanged, while presets 3, 4, and 5 correspond to low, medium, and high differences. The feature requires a lyric-bearing MIDI assignment for the track. Lyrics such as `jia` or the Chinese character `家` are converted to pinyin with `pypinyin`, and the actual consonant onset is detected near the MIDI note timestamp. Without lyric MIDI, the existing pitch and timbre variation pipeline still works and only articulation processing is skipped.
+
+To generate a listening comparison with levels 1, 3, and 5 and three copies per level:
+
+```powershell
+python tools\timbre_variation_comparison.py singer.wav --midi singer.mid --voice-style child
+```
+
+The tool writes a `manifest.json` containing the source audio, preset levels, voice style, and generated files. `--voice-style` accepts `popular`, `bel_canto`, or `child`.
 
 ---
 
@@ -47,6 +70,6 @@ A: Delete the `.render_cache/` folder inside the project directory. The next ren
 
 ---
 
-Tech stack: Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN (neural vocoder for timbre variation re-synthesis) · torchcrepe · soundfile · sounddevice
+Tech stack: Python 3.11 · PySide6 · NumPy / SciPy · pyroomacoustics · librosa · OpenVPI PC-NSF-HiFiGAN (neural vocoder for timbre variation re-synthesis) · torchcrepe · pypinyin · soundfile · sounddevice
 
 *This project is for learning and research purposes only. Please ensure you have the appropriate rights before mixing third-party recordings.*

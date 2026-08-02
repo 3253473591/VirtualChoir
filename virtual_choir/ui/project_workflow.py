@@ -280,10 +280,12 @@ class ProjectWorkflowMixin:
         # thread; a Python lambda has no receiver thread affinity.
         self._dup_source_track = deepcopy(source_track)
         self._dup_preset_level = opts["preset_level"]
+        self._dup_voice_style = opts["voice_style"]
         self.dup_thread = QThread(self)
         self.dup_worker = DuplicateWorker(
             source_path, opts["copy_count"], output_dir, opts["preset_level"],
             vibrato_midi_path, midi_assignment.midi_track_index if midi_assignment else None,
+            voice_style=opts["voice_style"],
         )
         self.dup_worker.moveToThread(self.dup_thread)
         # Worker signals are always delivered to MainWindow on the GUI thread.
@@ -342,6 +344,7 @@ class ProjectWorkflowMixin:
                     ),
                     copy_index=idx,
                     variation_preset=self._dup_preset_level,
+                    variation_style=self._dup_voice_style,
                 )
                 track.validate(self.project.room)
                 self.project.tracks.append(track)
@@ -373,6 +376,7 @@ class ProjectWorkflowMixin:
         self.dup_thread = None
         self._dup_source_track = None
         self._dup_preset_level = None
+        self._dup_voice_style = None
         self._set_duplicate_ui_enabled(True)
         self.stop_button.setEnabled(False)
         self._overlay.hide_overlay()
