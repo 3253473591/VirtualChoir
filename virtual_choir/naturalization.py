@@ -17,10 +17,11 @@ from .cuda_acceleration import create_linear_sampler
 from .errors import ChoirError
 from .models import NaturalizationConfig, midi_assignment_for_track
 
-NATURALIZATION_VERSION = "1.4.0"
-OFFSET_STDDEV_MS = 3.0
+NATURALIZATION_VERSION = "1.3.1"
+OFFSET_STDDEV_MS = 5.0
 OFFSET_LIMIT_MS = 15.0
 TAIL_GAP_THRESHOLD_S = 0.020
+SHORT_NOTE_TAIL_OFFSET_THRESHOLD_S = 0.400
 TAIL_LEFT_MEAN_MS = -12.0
 TAIL_LEFT_STDDEV_MS = 20.0
 TAIL_LEFT_RANGE_MS = (-30.0, 0.0)
@@ -376,12 +377,11 @@ def _choose_offsets(
         end_offset = 0.0
         # MIDI tick conversion can turn an exact 20 ms gap into
         # 0.020000000000000018, so retain the strict rule with a tiny tolerance.
-        available_tail_s = (
-            next_unit.start_s - unit.end_s
-            if next_unit is not None
-            else (audio_duration_s - unit.end_s if audio_duration_s is not None else float("inf"))
-        )
-        if available_tail_s > TAIL_GAP_THRESHOLD_S + 1e-9:
+        if (
+            next_unit is not None
+            and unit.end_s - unit.start_s > SHORT_NOTE_TAIL_OFFSET_THRESHOLD_S
+            and next_unit.start_s - unit.end_s > TAIL_GAP_THRESHOLD_S + 1e-9
+        ):
             end_offset = _choose_tail_offset(rng)
         records.append(UnitOffset(
             unit.index, unit.pitch, unit.start_s, unit.end_s,
